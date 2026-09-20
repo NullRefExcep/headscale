@@ -3,6 +3,7 @@ package hscontrol
 import (
 	"encoding/json"
 	"net/http"
+	"net/netip"
 	"testing"
 
 	"github.com/juanfont/headscale/hscontrol/types"
@@ -307,6 +308,59 @@ func TestAPIV1NodeSetApprovedRoutes(t *testing.T) {
 			[]byte(`{"routes":[]}`))
 		assertStatus(t, res, http.StatusBadRequest)
 	})
+}
+
+func TestAPIV1NodeSetIPs(t *testing.T) {
+	h := newAPIV1Harness(t, func(cfg *types.Config) {
+		prefix4 := netip.MustParsePrefix("100.64.0.0/10")
+		prefix6 := netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+		cfg.PrefixV4 = &prefix4
+		cfg.PrefixV6 = &prefix6
+		cfg.IPAllocation = types.IPAllocationStrategySequential
+	})
+	seedNodes(
+		newNodeSeed("alice", "node-a"),
+		newNodeSeed("bob", "node-b"),
+	)(t, h.app)
+
+	path := "/api/v1/node/1/ip"
+	res := h.callHuma(http.MethodPost, path,
+		[]byte(`{"ipAddresses":["100.64.20.30","fd7a:115c:a1e0::1234"]}`))
+	require.Equal(t, http.StatusOK, res.status, string(res.body))
+
+	var got struct {
+		Node struct {
+			IPAddresses []string `json:"ipAddresses"`
+		} `json:"node"`
+	}
+	require.NoError(t, json.Unmarshal(res.body, &got))
+	require.Equal(t, []string{"100.64.20.30", "fd7a:115c:a1e0::1234"}, got.Node.IPAddresses)
+
+	res = h.callHuma(http.MethodPost, path,
+		[]byte(`{"ipAddresses":["100.64.20.31"]}`))
+	require.Equal(t, http.StatusOK, res.status, string(res.body))
+	require.NoError(t, json.Unmarshal(res.body, &got))
+	require.Equal(t, []string{"100.64.20.31", "fd7a:115c:a1e0::1234"}, got.Node.IPAddresses)
+
+	for _, tc := range []struct {
+		name   string
+		path   string
+		body   string
+		status int
+	}{
+		{"empty", path, `{"ipAddresses":[]}`, http.StatusBadRequest},
+		{"duplicate family", path, `{"ipAddresses":["100.64.1.2","100.64.1.3"]}`, http.StatusBadRequest},
+		{"invalid", path, `{"ipAddresses":["invalid"]}`, http.StatusBadRequest},
+		{"outside prefix", path, `{"ipAddresses":["192.0.2.1"]}`, http.StatusBadRequest},
+		{"reserved", path, `{"ipAddresses":["100.100.100.1"]}`, http.StatusBadRequest},
+		{"in use", "/api/v1/node/2/ip", `{"ipAddresses":["100.64.20.31"]}`, http.StatusConflict},
+		{"missing node", "/api/v1/node/999/ip", `{"ipAddresses":["100.64.1.2"]}`, http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := h.callHuma(http.MethodPost, tc.path, []byte(tc.body))
+			require.Equal(t, tc.status, res.status, string(res.body))
+		})
+	}
 }
 
 func TestAPIV1NodeRegister(t *testing.T) {

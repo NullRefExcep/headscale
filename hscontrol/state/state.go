@@ -80,6 +80,8 @@ var ErrNodeNotInNodeStore = errors.New("node no longer exists in NodeStore")
 // ErrNodeNameNotUnique is returned when a node name is not unique.
 var ErrNodeNameNotUnique = errors.New("node name is not unique")
 
+var ErrNoIPAddresses = errors.New("at least one IP address is required")
+
 // nodeUpdateColumns lists all Node columns that should be written
 // during a struct-based GORM Updates() call.  Listing them explicitly
 // forces GORM to include nil/zero-value fields (e.g. UserID=nil when
@@ -602,7 +604,14 @@ func (s *State) SaveNode(node types.NodeView) (types.NodeView, change.Change, er
 func (s *State) DeleteNode(node types.NodeView) (change.Change, error) {
 	s.persistMu.Lock()
 
-	err := s.db.DeleteNode(node.AsStruct())
+	fresh, ok := s.nodeStore.GetNode(node.ID())
+	if !ok {
+		s.persistMu.Unlock()
+
+		return change.Change{}, fmt.Errorf("%w: %d", ErrNodeNotInNodeStore, node.ID())
+	}
+
+	err := s.db.DeleteNode(fresh.AsStruct())
 	if err != nil {
 		s.persistMu.Unlock()
 
@@ -613,9 +622,8 @@ func (s *State) DeleteNode(node types.NodeView) (change.Change, error) {
 	// node after its row is gone so a failed database write cannot make a live
 	// node look deleted until the next restart.
 	s.nodeStore.DeleteNode(node.ID())
+	s.ipAlloc.FreeIPs(fresh.IPs())
 	s.persistMu.Unlock()
-
-	s.ipAlloc.FreeIPs(node.IPs())
 
 	c := change.NodeRemoved(node.ID())
 
@@ -1083,8 +1091,83 @@ func (s *State) RenameNode(nodeID types.NodeID, newName string) (types.NodeView,
 	return s.persistNodeAndRefreshPolicy(view)
 }
 
+// SetNodeIPs assigns the requested address families to an existing node.
+// Omitted families keep their current address. New addresses are reserved
+// before the database write so concurrent allocation cannot claim them.
+func (s *State) SetNodeIPs(nodeID types.NodeID, ipv4, ipv6 *netip.Addr) (types.NodeView, change.Change, error) {
+	if ipv4 == nil && ipv6 == nil {
+		return types.NodeView{}, change.Change{}, ErrNoIPAddresses
+	}
+
+	if (ipv4 != nil && !ipv4.Is4()) || (ipv6 != nil && (!ipv6.Is6() || ipv6.Zone() != "")) {
+		return types.NodeView{}, change.Change{}, fmt.Errorf("%w: address family does not match field", hsdb.ErrIPOutsidePrefix)
+	}
+
+	s.persistMu.Lock()
+
+	current, ok := s.nodeStore.GetNode(nodeID)
+	if !ok {
+		s.persistMu.Unlock()
+
+		return types.NodeView{}, change.Change{}, fmt.Errorf("%w: %d", ErrNodeNotInNodeStore, nodeID)
+	}
+
+	old := current.IPs()
+
+	node := current.AsStruct()
+	if ipv4 != nil {
+		node.IPv4 = ipv4
+	}
+
+	if ipv6 != nil {
+		node.IPv6 = ipv6
+	}
+
+	desired := node.IPs()
+	if slices.Equal(old, desired) {
+		s.persistMu.Unlock()
+		return current, change.Change{}, nil
+	}
+
+	err := s.ipAlloc.ReserveReassignedIPs(old, desired)
+	if err != nil {
+		s.persistMu.Unlock()
+		return types.NodeView{}, change.Change{}, err
+	}
+
+	err = s.db.DB.Model(node).Select("ipv4", "ipv6").Updates(node).Error
+	if err != nil {
+		s.ipAlloc.CompleteReassignedIPs(old, desired, false)
+		s.persistMu.Unlock()
+
+		return types.NodeView{}, change.Change{}, fmt.Errorf("saving node IPs: %w", err)
+	}
+
+	updated, ok := s.nodeStore.UpdateNode(nodeID, func(n *types.Node) {
+		n.IPv4 = node.IPv4
+		n.IPv6 = node.IPv6
+	})
+	if !ok {
+		s.persistMu.Unlock()
+		// Keep both old and new addresses reserved until restart: the DB
+		// committed but the in-memory node could not be updated.
+		return types.NodeView{}, change.Change{}, fmt.Errorf("%w after saving IPs: %d", ErrNodeNotInNodeStore, nodeID)
+	}
+
+	s.ipAlloc.CompleteReassignedIPs(old, desired, true)
+	s.persistMu.Unlock()
+
+	// IPs can appear in ACLs and DNS responses, and the node itself needs
+	// its new addresses. Recompute policy and send an authoritative map.
+	_, err = s.updatePolicyManagerNodes()
+
+	return updated, change.FullUpdate(), err
+}
+
 // BackfillNodeIPs assigns IP addresses to nodes that don't have them.
 func (s *State) BackfillNodeIPs() ([]string, error) {
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
 	changes, err := s.db.BackfillNodeIPs(s.ipAlloc)
 	if err != nil {
 		return nil, err

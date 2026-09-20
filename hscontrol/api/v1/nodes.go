@@ -80,6 +80,12 @@ type SetApprovedRoutesRequestBody struct {
 	Routes []string `json:"routes,omitempty"`
 }
 
+// SetNodeIPsRequestBody assigns one address per supplied family.
+// A family omitted from this list keeps its existing address.
+type SetNodeIPsRequestBody struct {
+	IPAddresses []string `json:"ipAddresses" nullable:"false"`
+}
+
 // DebugCreateNodeRequestBody mirrors v1.DebugCreateNodeRequest.
 type DebugCreateNodeRequestBody struct {
 	User   string   `json:"user,omitempty"`
@@ -144,6 +150,11 @@ type setTagsInput struct {
 type setApprovedRoutesInput struct {
 	NodeID string `format:"uint64" path:"nodeId"`
 	Body   SetApprovedRoutesRequestBody
+}
+
+type setNodeIPsInput struct {
+	NodeID string `format:"uint64" path:"nodeId"`
+	Body   SetNodeIPsRequestBody
 }
 
 type registerNodeInput struct {
@@ -410,6 +421,64 @@ func registerNodeWriteOps(api huma.API, b Backend) {
 }
 
 func registerNodeAdminOps(api huma.API, b Backend) {
+	huma.Register(api, huma.Operation{
+		OperationID: "setNodeIPs",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/node/{nodeId}/ip",
+		Summary:     "Set node IP addresses",
+		Tags:        []string{"Nodes"},
+		Security:    bearerAuth,
+	}, func(ctx context.Context, in *setNodeIPsInput) (*nodeOutput, error) {
+		nodeID, err := parseNodeID(in.NodeID)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(in.Body.IPAddresses) == 0 || len(in.Body.IPAddresses) > 2 {
+			return nil, huma.Error400BadRequest("provide one or two IP addresses")
+		}
+
+		var ipv4, ipv6 *netip.Addr
+
+		for _, raw := range in.Body.IPAddresses {
+			ip, parseErr := netip.ParseAddr(raw)
+			if parseErr != nil || ip.Zone() != "" {
+				return nil, huma.Error400BadRequest("invalid IP address: " + raw)
+			}
+
+			switch {
+			case ip.Is4():
+				if ipv4 != nil {
+					return nil, huma.Error400BadRequest("multiple IPv4 addresses")
+				}
+
+				ipv4 = &ip
+			case ip.Is6():
+				if ipv6 != nil {
+					return nil, huma.Error400BadRequest("multiple IPv6 addresses")
+				}
+
+				ipv6 = &ip
+			default:
+				return nil, huma.Error400BadRequest("invalid IP address: " + raw)
+			}
+		}
+
+		node, nodeChange, err := b.State.SetNodeIPs(nodeID, ipv4, ipv6)
+		if !nodeChange.IsEmpty() {
+			b.Change(nodeChange)
+		}
+
+		if err != nil {
+			return nil, mapError("setting node IPs", err)
+		}
+
+		out := &nodeOutput{}
+		out.Body.Node = nodeFromView(node)
+
+		return out, nil
+	})
+
 	huma.Register(api, huma.Operation{
 		OperationID: "setApprovedRoutes",
 		Method:      http.MethodPost,

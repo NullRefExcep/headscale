@@ -40,6 +40,11 @@ func init() {
 	mustMarkRequired(renameNodeCmd, "identifier")
 	nodeCmd.AddCommand(renameNodeCmd)
 
+	setNodeIPCmd.Flags().Uint64P("identifier", "i", 0, "Node identifier (ID)")
+	setNodeIPCmd.Flags().StringSlice("ip", nil, "One IPv4 and/or one IPv6 address")
+	mustMarkRequired(setNodeIPCmd, "identifier", "ip")
+	nodeCmd.AddCommand(setNodeIPCmd)
+
 	deleteNodeCmd.Flags().Uint64P("identifier", "i", 0, "Node identifier (ID)")
 	mustMarkRequired(deleteNodeCmd, "identifier")
 	nodeCmd.AddCommand(deleteNodeCmd)
@@ -255,6 +260,30 @@ var renameNodeCmd = &cobra.Command{
 		}
 
 		return printOutput(cmd, resp.JSON200.Node, "Node renamed")
+	}),
+}
+
+var setNodeIPCmd = &cobra.Command{
+	Use:   "set-ip",
+	Short: "Set a node's IPv4 and/or IPv6 address",
+	RunE: clientRunE(func(ctx context.Context, client *clientv1.ClientWithResponses, cmd *cobra.Command, args []string) error {
+		identifier, _ := cmd.Flags().GetUint64("identifier")
+		ips, _ := cmd.Flags().GetStringSlice("ip")
+
+		resp, err := client.SetNodeIPsWithResponse(
+			ctx,
+			strconv.FormatUint(identifier, util.Base10),
+			clientv1.SetNodeIPsRequestBody{IpAddresses: ips},
+		)
+		if err != nil {
+			return fmt.Errorf("setting node IPs: %w", err)
+		}
+
+		if resp.StatusCode() != http.StatusOK {
+			return apiError(resp.StatusCode(), resp.ApplicationproblemJSONDefault)
+		}
+
+		return printOutput(cmd, resp.JSON200.Node, "Node IP addresses updated")
 	}),
 }
 

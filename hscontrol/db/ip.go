@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/netip"
+	"slices"
 	"sync"
 
 	"github.com/juanfont/headscale/hscontrol/types"
@@ -22,6 +23,14 @@ var (
 	errGeneratedIPNotInPrefix  = errors.New("generated ip not in prefix")
 	errIPAllocatorNil          = errors.New("ip allocator was nil")
 )
+
+// Tailscale reserves these CGNAT ranges for internal services.
+// See https://tailscale.com/docs/reference/ip-pool.
+var reservedTailscaleIPv4Ranges = []netip.Prefix{
+	netip.MustParsePrefix("100.100.0.0/24"),
+	netip.MustParsePrefix("100.100.100.0/24"),
+	netip.MustParsePrefix("100.101.102.103/32"),
+}
 
 // IPAllocator is a singleton responsible for allocating
 // IP addresses for nodes and making sure the same
@@ -163,6 +172,83 @@ func (i *IPAllocator) Next() (*netip.Addr, *netip.Addr, error) {
 
 var ErrCouldNotAllocateIP = errors.New("failed to allocate IP")
 
+var (
+	ErrIPOutsidePrefix = errors.New("IP address is outside configured prefix")
+	ErrIPReserved      = errors.New("IP address is reserved")
+	ErrIPInUse         = errors.New("IP address is already in use")
+)
+
+// ReserveReassignedIPs holds newly requested addresses against concurrent
+// allocation until CompleteReassignedIPs finalizes or rolls back the change.
+// The caller must serialize changes to the same node and call Complete once.
+func (i *IPAllocator) ReserveReassignedIPs(old, desired []netip.Addr) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	used, err := i.usedIPs.IPSet()
+	if err != nil {
+		return fmt.Errorf("building used IP set: %w", err)
+	}
+
+	for _, ip := range desired {
+		if slices.Contains(old, ip) {
+			continue
+		}
+
+		var prefix *netip.Prefix
+
+		if ip.Is4() {
+			prefix = i.prefix4
+		} else if ip.Is6() && ip.Zone() == "" {
+			prefix = i.prefix6
+		}
+
+		if prefix == nil || !prefix.Contains(ip) {
+			return fmt.Errorf("%w: %s", ErrIPOutsidePrefix, ip)
+		}
+
+		network, last := util.GetIPPrefixEndpoints(*prefix)
+		if ip == network || ip == last || isTailscaleReservedIP(ip) {
+			return fmt.Errorf("%w: %s", ErrIPReserved, ip)
+		}
+
+		if used.Contains(ip) {
+			return fmt.Errorf("%w: %s", ErrIPInUse, ip)
+		}
+	}
+
+	for _, ip := range desired {
+		if !slices.Contains(old, ip) {
+			i.usedIPs.Add(ip)
+		}
+	}
+
+	return nil
+}
+
+// CompleteReassignedIPs releases either the old addresses after a commit or
+// the newly reserved addresses after a failed write.
+func (i *IPAllocator) CompleteReassignedIPs(old, desired []netip.Addr, committed bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	if committed {
+		for _, ip := range old {
+			if !slices.Contains(desired, ip) {
+				i.usedIPs.Remove(ip)
+			}
+		}
+
+		return
+	}
+
+	for _, ip := range desired {
+		if !slices.Contains(old, ip) {
+			i.usedIPs.Remove(ip)
+		}
+	}
+}
+
 // allocateNext allocates the next address from prefix under i.mu, advancing
 // prev so a run of allocations (e.g. BackfillNodeIPs) does not rescan
 // already-issued addresses, and so prev is read under the lock rather than in
@@ -291,7 +377,11 @@ func randomNext(pfx netip.Prefix) (netip.Addr, error) {
 func isTailscaleReservedIP(ip netip.Addr) bool {
 	return tsaddr.ChromeOSVMRange().Contains(ip) ||
 		tsaddr.TailscaleServiceIP() == ip ||
-		tsaddr.TailscaleServiceIPv6() == ip
+		tsaddr.TailscaleServiceIPv6() == ip ||
+		(ip.Is4() && slices.ContainsFunc(
+			reservedTailscaleIPv4Ranges,
+			func(p netip.Prefix) bool { return p.Contains(ip) },
+		))
 }
 
 // BackfillNodeIPs will take a database transaction, and

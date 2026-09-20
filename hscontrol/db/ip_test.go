@@ -15,6 +15,52 @@ import (
 	"tailscale.com/net/tsaddr"
 )
 
+func TestIPAllocatorReassignment(t *testing.T) {
+	alloc, err := NewIPAllocator(nil, mpp("100.64.0.0/10"), mpp("fd7a:115c:a1e0::/48"), types.IPAllocationStrategySequential)
+	require.NoError(t, err)
+
+	first := []netip.Addr{na("100.64.0.1"), na("fd7a:115c:a1e0::1")}
+	second := []netip.Addr{na("100.64.0.42"), first[1]}
+	require.NoError(t, alloc.ReserveReassignedIPs(nil, first))
+	alloc.CompleteReassignedIPs(nil, first, true)
+	require.ErrorIs(t, alloc.ReserveReassignedIPs(nil, first), ErrIPInUse)
+
+	require.NoError(t, alloc.ReserveReassignedIPs(first, second))
+	require.ErrorIs(t, alloc.ReserveReassignedIPs(nil, second), ErrIPInUse)
+	alloc.CompleteReassignedIPs(first, second, false)
+	require.NoError(t, alloc.ReserveReassignedIPs(nil, []netip.Addr{second[0]}))
+	alloc.CompleteReassignedIPs(nil, []netip.Addr{second[0]}, false)
+
+	require.NoError(t, alloc.ReserveReassignedIPs(first, second))
+	alloc.CompleteReassignedIPs(first, second, true)
+	require.NoError(t, alloc.ReserveReassignedIPs(nil, []netip.Addr{first[0]}))
+}
+
+func TestIPAllocatorReassignmentRejectsInvalidIPs(t *testing.T) {
+	alloc, err := NewIPAllocator(nil, mpp("100.64.0.0/10"), mpp("fd7a:115c:a1e0::/48"), types.IPAllocationStrategySequential)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		ip   string
+		want error
+	}{
+		{"192.0.2.1", ErrIPOutsidePrefix},
+		{"fd00::1", ErrIPOutsidePrefix},
+		{"100.64.0.0", ErrIPReserved},
+		{"100.127.255.255", ErrIPReserved},
+		{"100.100.0.2", ErrIPReserved},
+		{"100.100.100.1", ErrIPReserved},
+		{"100.101.102.103", ErrIPReserved},
+		{"100.115.92.1", ErrIPReserved},
+		{"fd7a:115c:a1e0::53", ErrIPReserved},
+	} {
+		t.Run(tc.ip, func(t *testing.T) {
+			err := alloc.ReserveReassignedIPs(nil, []netip.Addr{na(tc.ip)})
+			require.ErrorIs(t, err, tc.want)
+		})
+	}
+}
+
 var mpp = func(pref string) *netip.Prefix {
 	p := netip.MustParsePrefix(pref)
 	return &p
@@ -498,19 +544,23 @@ func TestIPAllocatorNextNoReservedIPs(t *testing.T) {
 		t.Fatalf("failed to set up ip alloc: %s", err)
 	}
 
-	// Validate that we do not give out 100.100.100.100
-	nextQuad100, err := alloc.next(na("100.100.100.99"), new(tsaddr.CGNATRange()))
-	require.NoError(t, err)
-	assert.Equal(t, na("100.100.100.101"), *nextQuad100)
+	for _, tc := range []struct {
+		name, previous, want string
+	}{
+		{"reserved 100.100.0.0/24", "100.99.255.255", "100.100.1.0"},
+		{"reserved 100.100.100.0/24", "100.100.99.255", "100.100.101.0"},
+		{"reserved tshello address", "100.101.102.102", "100.101.102.104"},
+		{"ChromeOS VM range", "100.115.91.255", "100.115.94.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			next, err := alloc.next(na(tc.previous), new(tsaddr.CGNATRange()))
+			require.NoError(t, err)
+			assert.Equal(t, na(tc.want), *next)
+		})
+	}
 
 	// Validate that we do not give out fd7a:115c:a1e0::53
 	nextQuad100v6, err := alloc.next(na("fd7a:115c:a1e0::52"), new(tsaddr.TailscaleULARange()))
 	require.NoError(t, err)
 	assert.Equal(t, na("fd7a:115c:a1e0::54"), *nextQuad100v6)
-
-	// Validate that we do not give out fd7a:115c:a1e0::53
-	nextChrome, err := alloc.next(na("100.115.91.255"), new(tsaddr.CGNATRange()))
-	t.Logf("chrome: %s", nextChrome.String())
-	require.NoError(t, err)
-	assert.Equal(t, na("100.115.94.0"), *nextChrome)
 }

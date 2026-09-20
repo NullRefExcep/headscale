@@ -36,10 +36,14 @@ func mapError(msg string, err error) error {
 		errors.Is(err, db.ErrUserStillHasNodes),
 		errors.Is(err, db.ErrCannotChangeOIDCUser),
 		errors.Is(err, db.ErrPreAuthKeyNotTaggedOrOwned),
+		errors.Is(err, db.ErrIPOutsidePrefix),
+		errors.Is(err, db.ErrIPReserved),
+		errors.Is(err, state.ErrNoIPAddresses),
 		errors.Is(err, db.ErrSingleUseAuthKeyHasBeenUsed):
 		return huma.Error400BadRequest(msg, err)
 
 	case errors.Is(err, state.ErrNodeKeyInUse),
+		errors.Is(err, db.ErrIPInUse),
 		errors.Is(err, state.ErrAmbiguousNodeOwnership):
 		return huma.Error409Conflict(msg, err)
 
