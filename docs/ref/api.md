@@ -58,6 +58,19 @@ Headscale server at `/api/v1/docs` for details.
         https://headscale.example.com/api/v1/auth/register
     ```
 
+=== "Set a node's IP addresses"
+
+    ```console
+    curl -H "Authorization: Bearer <API_KEY>" \
+        --json '{"ipAddresses":["100.64.20.30","fd7a:115c:a1e0::1234"]}' \
+        https://headscale.example.com/api/v1/node/1/ip
+    ```
+
+    The request must contain one or two addresses, with at most one IPv4 and one IPv6 address. An omitted family keeps
+    its current address. Addresses must be inside the server's configured IPv4 or IPv6 prefix, available, and outside
+    the reserved ranges. You can make the same change with
+    `headscale nodes set-ip -i 1 --ip 100.64.20.30 --ip fd7a:115c:a1e0::1234`.
+
 ## Join nodes with an OAuth client
 
 Headscale also serves a subset of the Tailscale-compatible API at `/api/v2`, which

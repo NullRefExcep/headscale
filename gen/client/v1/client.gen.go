@@ -300,6 +300,11 @@ type SetApprovedRoutesRequestBody struct {
 	Routes *[]string `json:"routes,omitempty"`
 }
 
+// SetNodeIPsRequestBody defines model for SetNodeIPsRequestBody.
+type SetNodeIPsRequestBody struct {
+	IpAddresses []string `json:"ipAddresses"`
+}
+
 // SetTagsRequestBody defines model for SetTagsRequestBody.
 type SetTagsRequestBody struct {
 	Tags *[]string `json:"tags,omitempty"`
@@ -378,6 +383,9 @@ type SetApprovedRoutesJSONRequestBody = SetApprovedRoutesRequestBody
 
 // ExpireNodeJSONRequestBody defines body for ExpireNode for application/json ContentType.
 type ExpireNodeJSONRequestBody = ExpireNodeRequestBody
+
+// SetNodeIPsJSONRequestBody defines body for SetNodeIPs for application/json ContentType.
+type SetNodeIPsJSONRequestBody = SetNodeIPsRequestBody
 
 // SetTagsJSONRequestBody defines body for SetTags for application/json ContentType.
 type SetTagsJSONRequestBody = SetTagsRequestBody
@@ -624,6 +632,20 @@ type ClientInterface interface {
 	//
 	// Corresponds with POST /api/v1/node/{nodeId}/expire (the `ExpireNode` operationId).
 	ExpireNode(ctx context.Context, nodeId string, body ExpireNodeJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetNodeIPsWithBody Set node IP addresses
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /api/v1/node/{nodeId}/ip (the `SetNodeIPs` operationId).
+	SetNodeIPsWithBody(ctx context.Context, nodeId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetNodeIPs Set node IP addresses
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /api/v1/node/{nodeId}/ip (the `SetNodeIPs` operationId).
+	SetNodeIPs(ctx context.Context, nodeId string, body SetNodeIPsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RenameNode Rename node
 	//
@@ -1133,6 +1155,40 @@ func (c *Client) ExpireNodeWithBody(ctx context.Context, nodeId string, contentT
 // Corresponds with POST /api/v1/node/{nodeId}/expire (the `ExpireNode` operationId).
 func (c *Client) ExpireNode(ctx context.Context, nodeId string, body ExpireNodeJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewExpireNodeRequest(c.Server, nodeId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetNodeIPsWithBody Set node IP addresses
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /api/v1/node/{nodeId}/ip (the `SetNodeIPs` operationId).
+func (c *Client) SetNodeIPsWithBody(ctx context.Context, nodeId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetNodeIPsRequestWithBody(c.Server, nodeId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetNodeIPs Set node IP addresses
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /api/v1/node/{nodeId}/ip (the `SetNodeIPs` operationId).
+func (c *Client) SetNodeIPs(ctx context.Context, nodeId string, body SetNodeIPsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetNodeIPsRequest(c.Server, nodeId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -2147,6 +2203,53 @@ func NewExpireNodeRequestWithBody(server string, nodeId string, contentType stri
 	return req, nil
 }
 
+// NewSetNodeIPsRequest calls the generic SetNodeIPs builder with application/json body
+func NewSetNodeIPsRequest(server string, nodeId string, body SetNodeIPsJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetNodeIPsRequestWithBody(server, nodeId, "application/json", bodyReader)
+}
+
+// NewSetNodeIPsRequestWithBody constructs an http.Request for the SetNodeIPs method, with any body, and a specified content type
+func NewSetNodeIPsRequestWithBody(server string, nodeId string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "nodeId", nodeId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uint64"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/node/%s/ip", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewRenameNodeRequest constructs an http.Request for the RenameNode method
 func NewRenameNodeRequest(server string, nodeId string, newName string) (*http.Request, error) {
 	var err error
@@ -2909,6 +3012,20 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with POST /api/v1/node/{nodeId}/expire (the `ExpireNode` operationId).
 	ExpireNodeWithResponse(ctx context.Context, nodeId string, body ExpireNodeJSONRequestBody, reqEditors ...RequestEditorFn) (*ExpireNodeResponse, error)
+
+	// SetNodeIPsWithBodyWithResponse Set node IP addresses
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/node/{nodeId}/ip (the `SetNodeIPs` operationId).
+	SetNodeIPsWithBodyWithResponse(ctx context.Context, nodeId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetNodeIPsResponse, error)
+
+	// SetNodeIPsWithResponse Set node IP addresses
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/node/{nodeId}/ip (the `SetNodeIPs` operationId).
+	SetNodeIPsWithResponse(ctx context.Context, nodeId string, body SetNodeIPsJSONRequestBody, reqEditors ...RequestEditorFn) (*SetNodeIPsResponse, error)
 
 	// RenameNodeWithResponse Rename node
 	//
@@ -3810,6 +3927,54 @@ func (r ExpireNodeResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r ExpireNodeResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type SetNodeIPsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *NodeOutputBody
+	// ApplicationproblemJSONDefault the response for an HTTP default `application/problem+json` response
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r SetNodeIPsResponse) GetJSON200() *NodeOutputBody {
+	return r.JSON200
+}
+
+// GetApplicationproblemJSONDefault returns the response for an HTTP default `application/problem+json` response
+func (r SetNodeIPsResponse) GetApplicationproblemJSONDefault() *ErrorModel {
+	return r.ApplicationproblemJSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r SetNodeIPsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r SetNodeIPsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetNodeIPsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SetNodeIPsResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -4754,6 +4919,32 @@ func (c *ClientWithResponses) ExpireNodeWithResponse(ctx context.Context, nodeId
 	return ParseExpireNodeResponse(rsp)
 }
 
+// SetNodeIPsWithBodyWithResponse Set node IP addresses
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/node/{nodeId}/ip (the `SetNodeIPs` operationId).
+func (c *ClientWithResponses) SetNodeIPsWithBodyWithResponse(ctx context.Context, nodeId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetNodeIPsResponse, error) {
+	rsp, err := c.SetNodeIPsWithBody(ctx, nodeId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetNodeIPsResponse(rsp)
+}
+
+// SetNodeIPsWithResponse Set node IP addresses
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/node/{nodeId}/ip (the `SetNodeIPs` operationId).
+func (c *ClientWithResponses) SetNodeIPsWithResponse(ctx context.Context, nodeId string, body SetNodeIPsJSONRequestBody, reqEditors ...RequestEditorFn) (*SetNodeIPsResponse, error) {
+	rsp, err := c.SetNodeIPs(ctx, nodeId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetNodeIPsResponse(rsp)
+}
+
 // RenameNodeWithResponse Rename node
 //
 // Returns a wrapper object for the known response body format(s).
@@ -5509,6 +5700,39 @@ func ParseExpireNodeResponse(rsp *http.Response) (*ExpireNodeResponse, error) {
 	}
 
 	response := &ExpireNodeResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest NodeOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetNodeIPsResponse parses an HTTP response from a SetNodeIPsWithResponse call
+func ParseSetNodeIPsResponse(rsp *http.Response) (*SetNodeIPsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetNodeIPsResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

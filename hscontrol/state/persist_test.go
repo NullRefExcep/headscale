@@ -143,6 +143,52 @@ func TestRegistrationIPPool(t *testing.T) {
 	require.Equal(t, netip.MustParseAddr("100.81.0.4"), *current.IPv4)
 }
 
+func TestSetNodeIPsPersistsAndKeepsOmittedFamily(t *testing.T) {
+	dbPath, s, nodeID := persistTestSetup(t)
+	before, ok := s.GetNodeByID(nodeID)
+	require.True(t, ok)
+	require.Len(t, before.IPs(), 2)
+
+	newIPv4 := netip.MustParseAddr("100.64.20.30")
+	updated, nodeChange, err := s.SetNodeIPs(nodeID, &newIPv4, nil)
+	require.NoError(t, err)
+	require.False(t, nodeChange.IsEmpty())
+	require.Equal(t, []netip.Addr{newIPv4, before.IPs()[1]}, updated.IPs())
+
+	_, duplicateChange, err := s.SetNodeIPs(nodeID, &newIPv4, nil)
+	require.NoError(t, err)
+	require.True(t, duplicateChange.IsEmpty())
+
+	_, _, err = s.SetNodeIPs(nodeID, nil, nil)
+	require.ErrorIs(t, err, ErrNoIPAddresses)
+
+	require.NoError(t, s.Close())
+	reopened := persistTestReopen(t, dbPath)
+	after, ok := reopened.GetNodeByID(nodeID)
+	require.True(t, ok)
+	require.Equal(t, updated.IPs(), after.IPs())
+}
+
+func TestDeleteNodeFreesReassignedIPsFromCurrentNode(t *testing.T) {
+	_, s, nodeID := persistTestSetup(t)
+	t.Cleanup(func() { _ = s.Close() })
+
+	stale, ok := s.GetNodeByID(nodeID)
+	require.True(t, ok)
+
+	newIPv4 := netip.MustParseAddr("100.64.20.30")
+	_, _, err := s.SetNodeIPs(nodeID, &newIPv4, nil)
+	require.NoError(t, err)
+
+	_, err = s.DeleteNode(stale)
+	require.NoError(t, err)
+
+	// The delete request may have captured the node before its IP changed.
+	// The allocator must release the address that was actually deleted.
+	require.NoError(t, s.ipAlloc.ReserveReassignedIPs(nil, []netip.Addr{newIPv4}))
+	s.ipAlloc.CompleteReassignedIPs(nil, []netip.Addr{newIPv4}, false)
+}
+
 // TestPersistEmptyApprovedRoutes covers the State.SetApprovedRoutes
 // path. The gRPC handler builds the slice via append from a nil
 // declaration, so when the operator passes `-r ""` the persist layer

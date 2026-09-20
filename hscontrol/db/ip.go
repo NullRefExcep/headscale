@@ -192,6 +192,83 @@ func (i *IPAllocator) NextFor(request IPAllocationRequest) (*netip.Addr, *netip.
 
 var ErrCouldNotAllocateIP = errors.New("failed to allocate IP")
 
+var (
+	ErrIPOutsidePrefix = errors.New("IP address is outside configured prefix")
+	ErrIPReserved      = errors.New("IP address is reserved")
+	ErrIPInUse         = errors.New("IP address is already in use")
+)
+
+// ReserveReassignedIPs holds newly requested addresses against concurrent
+// allocation until CompleteReassignedIPs finalizes or rolls back the change.
+// The caller must serialize changes to the same node and call Complete once.
+func (i *IPAllocator) ReserveReassignedIPs(old, desired []netip.Addr) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	used, err := i.usedIPs.IPSet()
+	if err != nil {
+		return fmt.Errorf("building used IP set: %w", err)
+	}
+
+	for _, ip := range desired {
+		if slices.Contains(old, ip) {
+			continue
+		}
+
+		var prefix *netip.Prefix
+
+		if ip.Is4() {
+			prefix = i.prefix4
+		} else if ip.Is6() && ip.Zone() == "" {
+			prefix = i.prefix6
+		}
+
+		if prefix == nil || !prefix.Contains(ip) {
+			return fmt.Errorf("%w: %s", ErrIPOutsidePrefix, ip)
+		}
+
+		network, last := util.GetIPPrefixEndpoints(*prefix)
+		if ip == network || ip == last || isTailscaleReservedIP(ip) {
+			return fmt.Errorf("%w: %s", ErrIPReserved, ip)
+		}
+
+		if used.Contains(ip) {
+			return fmt.Errorf("%w: %s", ErrIPInUse, ip)
+		}
+	}
+
+	for _, ip := range desired {
+		if !slices.Contains(old, ip) {
+			i.usedIPs.Add(ip)
+		}
+	}
+
+	return nil
+}
+
+// CompleteReassignedIPs releases either the old addresses after a commit or
+// the newly reserved addresses after a failed write.
+func (i *IPAllocator) CompleteReassignedIPs(old, desired []netip.Addr, committed bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	if committed {
+		for _, ip := range old {
+			if !slices.Contains(desired, ip) {
+				i.usedIPs.Remove(ip)
+			}
+		}
+
+		return
+	}
+
+	for _, ip := range desired {
+		if !slices.Contains(old, ip) {
+			i.usedIPs.Remove(ip)
+		}
+	}
+}
+
 // allocateNext allocates the next address from prefix under i.mu, advancing
 // prev so a run of allocations (e.g. BackfillNodeIPs) does not rescan
 // already-issued addresses, and so prev is read under the lock rather than in

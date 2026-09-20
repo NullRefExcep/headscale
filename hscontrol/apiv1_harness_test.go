@@ -15,6 +15,7 @@ import (
 	"time"
 
 	apiv1 "github.com/juanfont/headscale/hscontrol/api/v1"
+	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,10 +30,10 @@ type apiV1Harness struct {
 	huma http.Handler
 }
 
-func newAPIV1Harness(t *testing.T) *apiV1Harness {
+func newAPIV1Harness(t *testing.T, configure ...func(*types.Config)) *apiV1Harness {
 	t.Helper()
 
-	app := createTestApp(t)
+	app := createTestApp(t, configure...)
 
 	return &apiV1Harness{
 		app:  app,

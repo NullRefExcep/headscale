@@ -15,6 +15,51 @@ import (
 	"tailscale.com/net/tsaddr"
 )
 
+func TestIPAllocatorReassignment(t *testing.T) {
+	alloc, err := NewIPAllocator(nil, mpp("100.64.0.0/10"), mpp("fd7a:115c:a1e0::/48"), types.IPAllocationStrategySequential)
+	require.NoError(t, err)
+
+	first := []netip.Addr{na("100.64.0.1"), na("fd7a:115c:a1e0::1")}
+	second := []netip.Addr{na("100.64.0.42"), first[1]}
+	require.NoError(t, alloc.ReserveReassignedIPs(nil, first))
+	alloc.CompleteReassignedIPs(nil, first, true)
+	require.ErrorIs(t, alloc.ReserveReassignedIPs(nil, first), ErrIPInUse)
+
+	require.NoError(t, alloc.ReserveReassignedIPs(first, second))
+	require.ErrorIs(t, alloc.ReserveReassignedIPs(nil, second), ErrIPInUse)
+	alloc.CompleteReassignedIPs(first, second, false)
+	require.NoError(t, alloc.ReserveReassignedIPs(nil, []netip.Addr{second[0]}))
+	alloc.CompleteReassignedIPs(nil, []netip.Addr{second[0]}, false)
+
+	require.NoError(t, alloc.ReserveReassignedIPs(first, second))
+	alloc.CompleteReassignedIPs(first, second, true)
+	require.NoError(t, alloc.ReserveReassignedIPs(nil, []netip.Addr{first[0]}))
+}
+
+func TestIPAllocatorReassignmentRejectsInvalidIPs(t *testing.T) {
+	alloc, err := NewIPAllocator(nil, mpp("100.64.0.0/10"), mpp("fd7a:115c:a1e0::/48"), types.IPAllocationStrategySequential)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		ip   string
+		want error
+	}{
+		{"192.0.2.1", ErrIPOutsidePrefix},
+		{"fd00::1", ErrIPOutsidePrefix},
+		{"100.64.0.0", ErrIPReserved},
+		{"100.127.255.255", ErrIPReserved},
+		{"100.100.0.2", ErrIPReserved},
+		{"100.100.100.1", ErrIPReserved},
+		{"100.115.92.1", ErrIPReserved},
+		{"fd7a:115c:a1e0::53", ErrIPReserved},
+	} {
+		t.Run(tc.ip, func(t *testing.T) {
+			err := alloc.ReserveReassignedIPs(nil, []netip.Addr{na(tc.ip)})
+			require.ErrorIs(t, err, tc.want)
+		})
+	}
+}
+
 var mpp = func(pref string) *netip.Prefix {
 	p := netip.MustParsePrefix(pref)
 	return &p

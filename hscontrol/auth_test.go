@@ -3344,7 +3344,7 @@ func TestWebFlowReauthDifferentUser(t *testing.T) {
 }
 
 // Helper function to create test app.
-func createTestApp(t *testing.T) *Headscale {
+func createTestApp(t *testing.T, configure ...func(*types.Config)) *Headscale {
 	t.Helper()
 
 	tmpDir := t.TempDir()
@@ -3366,6 +3366,9 @@ func createTestApp(t *testing.T) *Headscale {
 			BatchChangeDelay: 100 * time.Millisecond,
 			BatcherWorkers:   1,
 		},
+	}
+	for _, configure := range configure {
+		configure(&cfg)
 	}
 
 	app, err := NewHeadscale(&cfg)
