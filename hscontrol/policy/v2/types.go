@@ -89,9 +89,9 @@ var (
 var (
 	ErrNodeAttrsIPPoolReserved      = errors.New("nodeAttrs ipPool must not overlap reserved Tailscale ranges")
 	ErrNodeAttrsIPPoolOutOfRange    = errors.New("nodeAttrs ipPool must be within 100.64.0.0/10")
+	ErrNodeAttrsIPPoolTarget        = errors.New("nodeAttrs ipPool target must identify a user or tag before IP allocation")
 	ErrNodeAttrsAutogroupNotAllowed = errors.New("nodeAttrs target does not support this autogroup")
 	ErrNodeAttrUnsupported          = errors.New("nodeAttrs uses a feature headscale does not yet support")
-	ErrNodeAttrIPPoolUnsupported    = errors.New("nodeAttrs ipPool requires the IP allocator (https://github.com/juanfont/headscale/issues/2912)")
 	ErrNodeAttrTargetUnsupported    = errors.New("nodeAttrs target alias type is not supported")
 )
 
@@ -1848,8 +1848,7 @@ type Grant struct {
 // resolved exactly like ACL/grant sources, so users, groups, tags, hosts,
 // prefixes, autogroup:member, autogroup:tagged, and "*" are all valid.
 //
-// IPPool is parsed and validated for forward compatibility with the IP
-// allocator; the policy compiler does not consume it yet.
+// IPPool selects IPv4 allocation ranges for newly registered nodes.
 type NodeAttrGrant struct {
 	Targets Aliases        `json:"target"`
 	Attrs   []nodecap.Cap  `json:"attr,omitempty"`
@@ -1968,11 +1967,13 @@ var (
 // reservedTSRanges are CGNAT subranges that Tailscale uses internally and that
 // nodeAttrs ipPool entries must not overlap.
 //
+//   - 100.100.0.0/24 is reserved by Tailscale
 //   - 100.100.100.0/24 is MagicDNS / TSMP
 //   - 100.115.92.0/23 is the Quad100 / IPN service range
 //
 // (See https://tailscale.com/kb/1304/ip-pool for the operator-facing list.)
 var reservedTSRanges = []netip.Prefix{
+	netip.MustParsePrefix("100.100.0.0/24"),
 	netip.MustParsePrefix("100.100.100.0/24"),
 	netip.MustParsePrefix("100.115.92.0/23"),
 }
@@ -2675,14 +2676,22 @@ func (p *Policy) validate() error {
 			}
 		}
 
-		if len(na.IPPool) > 0 {
-			errs = append(errs, ErrNodeAttrIPPoolUnsupported)
-		}
-
 		for _, prefix := range na.IPPool {
 			err := validateNodeAttrIPPool(prefix)
 			if err != nil {
 				errs = append(errs, err)
+			}
+		}
+		if len(na.IPPool) > 0 {
+			if len(na.Targets) == 0 {
+				errs = append(errs, ErrNodeAttrsIPPoolTarget)
+			}
+			for _, target := range na.Targets {
+				switch target.(type) {
+				case *Username, *Group, *Tag, *AutoGroup, Asterix:
+				default:
+					errs = append(errs, fmt.Errorf("%w: %s", ErrNodeAttrsIPPoolTarget, target))
+				}
 			}
 		}
 	}

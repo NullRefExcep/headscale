@@ -86,6 +86,58 @@ func persistTestConfig(dbPath string) *types.Config {
 	}
 }
 
+func TestRegistrationIPPool(t *testing.T) {
+	cfg := persistTestConfig(t.TempDir() + "/headscale.db")
+	prefix := netip.MustParsePrefix("100.81.0.0/29")
+	cfg.PrefixV4 = &prefix
+
+	database, err := db.NewHeadscaleDatabase(cfg)
+	require.NoError(t, err)
+	alice := database.CreateUserForTest("alice")
+	bob := database.CreateUserForTest("bob")
+	require.NoError(t, database.Close())
+
+	s, err := NewState(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	_, err = s.SetPolicy([]byte(`{
+		"groups": {"group:dev": ["alice@"]},
+		"nodeAttrs": [{"target": ["group:dev"], "ipPool": ["100.81.0.0/30"]}]
+	}`))
+	require.NoError(t, err)
+
+	register := func(user *types.User, name string) types.NodeView {
+		node, err := s.createAndSaveNewNode(newNodeParams{
+			User:           *user,
+			MachineKey:     key.NewMachine().Public(),
+			NodeKey:        key.NewNode().Public(),
+			DiscoKey:       key.NewDisco().Public(),
+			Hostname:       name,
+			RegisterMethod: util.RegisterMethodCLI,
+		})
+		require.NoError(t, err)
+		return node
+	}
+
+	dev := register(alice, "dev")
+	ordinary := register(bob, "ordinary")
+	require.Equal(t, netip.MustParseAddr("100.81.0.1"), dev.IPv4().Get())
+	require.Equal(t, netip.MustParseAddr("100.81.0.4"), ordinary.IPv4().Get())
+	missing := s.db.CreateNodeForTest(alice, "missing")
+	_, _, err = s.BackfillNodeIPs()
+	require.NoError(t, err)
+	filled, err := s.db.GetNodeByID(types.NodeID(missing.ID))
+	require.NoError(t, err)
+	require.Equal(t, netip.MustParseAddr("100.81.0.2"), *filled.IPv4)
+
+	_, err = s.SetPolicy([]byte(`{"nodeAttrs": [{"target": ["bob@"], "ipPool": ["100.81.0.0/30"]}]}`))
+	require.NoError(t, err)
+	current, err := s.db.GetNodeByID(ordinary.ID())
+	require.NoError(t, err)
+	require.Equal(t, netip.MustParseAddr("100.81.0.4"), *current.IPv4)
+}
+
 // TestPersistEmptyApprovedRoutes covers the State.SetApprovedRoutes
 // path. The gRPC handler builds the slice via append from a nil
 // declaration, so when the operator passes `-r ""` the persist layer

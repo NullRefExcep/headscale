@@ -241,9 +241,9 @@ func TestNodeAttrsValidate(t *testing.T) {
 			wantErr: ErrNodeAttrUnsupported,
 		},
 		{
-			name:    "ipPool set rejected as unsupported",
-			extra:   `"nodeAttrs": [{"target": ["autogroup:member"], "ipPool": ["100.81.0.0/16"]}]`,
-			wantErr: ErrNodeAttrIPPoolUnsupported,
+			name:    "ipPool address target rejected before allocation",
+			extra:   `"nodeAttrs": [{"target": ["100.64.0.1"], "ipPool": ["100.81.0.0/16"]}]`,
+			wantErr: ErrNodeAttrsIPPoolTarget,
 		},
 		{
 			name:    "ipPool overlapping reserved range rejected at validate",
@@ -271,6 +271,47 @@ func TestNodeAttrsValidate(t *testing.T) {
 	}
 }
 
+func TestNodeAttrsIPPoolSelection(t *testing.T) {
+	users := nodeAttrsTestUsers()
+	policy := `{
+		"groups": {"group:dev": ["alice@example.com"]},
+		"tagOwners": {"tag:server": ["alice@example.com"]},
+		"nodeAttrs": [
+			{"target": ["group:dev"], "ipPool": ["100.81.0.0/16"]},
+			{"target": ["tag:server"], "ipPool": ["100.85.0.0/16"]}
+		]
+	}`
+	configured := netip.MustParsePrefix("100.64.0.0/10")
+	pm, err := NewPolicyManager([]byte(policy), users, types.Nodes{}.ViewSlice(), &configured)
+	require.NoError(t, err)
+
+	userNode := types.Node{User: &users[0], UserID: &users[0].ID}
+	selected, reserved := pm.IPPoolsForNode(userNode.View())
+	assert.Equal(t, []netip.Prefix{netip.MustParsePrefix("100.81.0.0/16")}, selected)
+	assert.Len(t, reserved, 2)
+
+	taggedNode := types.Node{Tags: []string{"tag:server"}}
+	selected, _ = pm.IPPoolsForNode(taggedNode.View())
+	assert.Equal(t, []netip.Prefix{netip.MustParsePrefix("100.85.0.0/16")}, selected)
+
+	otherNode := types.Node{User: &users[1], UserID: &users[1].ID}
+	selected, _ = pm.IPPoolsForNode(otherNode.View())
+	assert.Empty(t, selected)
+
+	tooSmall := netip.MustParsePrefix("100.80.0.0/16")
+	_, err = NewPolicyManager([]byte(policy), users, types.Nodes{}.ViewSlice(), &tooSmall)
+	require.ErrorContains(t, err, "outside configured IPv4 prefix")
+
+	_, err = NewPolicyManager([]byte(policy), users, types.Nodes{}.ViewSlice(), nil)
+	require.ErrorContains(t, err, "outside configured IPv4 prefix")
+
+	before, _ := pm.IPPoolsForNode(userNode.View())
+	_, err = pm.SetPolicy([]byte(`{"nodeAttrs": [{"target": ["*"], "ipPool": ["100.100.0.0/24"]}]}`))
+	require.ErrorIs(t, err, ErrNodeAttrsIPPoolReserved)
+	after, _ := pm.IPPoolsForNode(userNode.View())
+	assert.Equal(t, before, after)
+}
+
 func TestNodeAttrsIPPoolValidator(t *testing.T) {
 	t.Parallel()
 
@@ -283,6 +324,7 @@ func TestNodeAttrsIPPoolValidator(t *testing.T) {
 		{name: "outside cgnat", prefix: "10.0.0.0/8", wantErr: ErrNodeAttrsIPPoolOutOfRange},
 		{name: "less specific than cgnat", prefix: "100.0.0.0/8", wantErr: ErrNodeAttrsIPPoolOutOfRange},
 		{name: "whole cgnat overlaps reserved", prefix: "100.64.0.0/10", wantErr: ErrNodeAttrsIPPoolReserved},
+		{name: "overlaps tailscale reserved range", prefix: "100.100.0.0/24", wantErr: ErrNodeAttrsIPPoolReserved},
 		{name: "overlaps quad100", prefix: "100.100.100.0/24", wantErr: ErrNodeAttrsIPPoolReserved},
 		{name: "overlaps ipn", prefix: "100.115.92.0/24", wantErr: ErrNodeAttrsIPPoolReserved},
 	}

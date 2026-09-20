@@ -186,6 +186,32 @@ func TestIPAllocatorSequential(t *testing.T) {
 	}
 }
 
+func TestIPAllocatorPools(t *testing.T) {
+	prefix := netip.MustParsePrefix("100.81.0.0/29")
+	pool := netip.MustParsePrefix("100.81.0.0/30")
+	alloc, err := NewIPAllocator(nil, &prefix, nil, types.IPAllocationStrategySequential)
+	require.NoError(t, err)
+
+	ordinary, _, err := alloc.NextForPools(nil, []netip.Prefix{pool})
+	require.NoError(t, err)
+	assert.Equal(t, na("100.81.0.4"), *ordinary)
+
+	first, _, err := alloc.NextForPools([]netip.Prefix{pool}, []netip.Prefix{pool})
+	require.NoError(t, err)
+	assert.Equal(t, na("100.81.0.1"), *first)
+
+	second, _, err := alloc.NextForPools([]netip.Prefix{pool}, []netip.Prefix{pool})
+	require.NoError(t, err)
+	assert.Equal(t, na("100.81.0.2"), *second)
+
+	_, _, err = alloc.NextForPools([]netip.Prefix{pool}, []netip.Prefix{pool})
+	require.ErrorIs(t, err, ErrCouldNotAllocateIP)
+
+	ordinary, _, err = alloc.NextForPools(nil, []netip.Prefix{pool})
+	require.NoError(t, err)
+	assert.Equal(t, na("100.81.0.5"), *ordinary)
+}
+
 func TestIPAllocatorRandom(t *testing.T) {
 	tests := []struct {
 		name   string

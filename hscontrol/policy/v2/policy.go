@@ -39,6 +39,9 @@ type PolicyManager struct {
 	nodes views.Slice[types.NodeView]
 	// nodesByID indexes nodes; see [PolicyManager.cacheableLocked].
 	nodesByID map[types.NodeID]types.NodeView
+	// Configured IPv4 prefix, when the manager belongs to a running State.
+	ipPoolPrefix           *netip.Prefix
+	ipPoolPrefixConfigured bool
 
 	filterHash deephash.Sum
 	filter     []tailcfg.FilterRule
@@ -198,7 +201,7 @@ func validateUserReferences(pol *Policy, users types.Users) error {
 // NewPolicyManager creates a new [PolicyManager] from a policy file and a list of users and nodes.
 // It returns an error if the policy file is invalid.
 // The policy manager will update the filter rules based on the users and nodes.
-func NewPolicyManager(b []byte, users []types.User, nodes views.Slice[types.NodeView]) (*PolicyManager, error) {
+func NewPolicyManager(b []byte, users []types.User, nodes views.Slice[types.NodeView], ipPoolPrefix ...*netip.Prefix) (*PolicyManager, error) {
 	policy, err := unmarshalPolicy(b)
 	if err != nil {
 		return nil, fmt.Errorf("parsing policy: %w", err)
@@ -217,6 +220,14 @@ func NewPolicyManager(b []byte, users []types.User, nodes views.Slice[types.Node
 		sshPolicyMap:       xsync.NewMap[types.NodeID, *tailcfg.SSHPolicy](),
 		filterRulesMap:     xsync.NewMap[types.NodeID, []tailcfg.FilterRule](),
 		matchersForNodeMap: xsync.NewMap[types.NodeID, []matcher.Match](),
+	}
+	if len(ipPoolPrefix) > 0 {
+		pm.ipPoolPrefix = ipPoolPrefix[0]
+		pm.ipPoolPrefixConfigured = true
+		err = pm.validateIPPoolPrefix(policy)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	_, err = pm.updateLocked()
@@ -582,6 +593,10 @@ func (pm *PolicyManager) SetPolicy(polB []byte) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("validating policy user references: %w", err)
 	}
+	err = pm.validateIPPoolPrefix(pol)
+	if err != nil {
+		return false, err
+	}
 
 	// SetPolicy is the user-write boundary. Tests evaluate against a
 	// sandbox compiled from the new policy + current users/nodes; if
@@ -623,6 +638,65 @@ func (pm *PolicyManager) SetPolicy(polB []byte) (bool, error) {
 	}
 
 	return changed, nil
+}
+
+func (pm *PolicyManager) validateIPPoolPrefix(pol *Policy) error {
+	if !pm.ipPoolPrefixConfigured || pol == nil {
+		return nil
+	}
+	for _, grant := range pol.NodeAttrs {
+		for _, pool := range grant.IPPool {
+			if pm.ipPoolPrefix == nil ||
+				pool.Bits() < pm.ipPoolPrefix.Bits() ||
+				!pm.ipPoolPrefix.Contains(pool.Masked().Addr()) {
+				return fmt.Errorf("nodeAttrs ipPool %s is outside configured IPv4 prefix", pool)
+			}
+		}
+	}
+	return nil
+}
+
+// IPPoolsForNode returns the pools selected for a node and all pools reserved
+// from ordinary allocation. A new node can be matched before it has an IP.
+func (pm *PolicyManager) IPPoolsForNode(node types.NodeView) ([]netip.Prefix, []netip.Prefix) {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	if pm.pol == nil {
+		return nil, nil
+	}
+
+	var selected, reserved []netip.Prefix
+	for _, grant := range pm.pol.NodeAttrs {
+		if len(grant.IPPool) == 0 {
+			continue
+		}
+		reserved = append(reserved, grant.IPPool...)
+		matched := false
+		for _, target := range grant.Targets {
+			switch t := target.(type) {
+			case Asterix:
+				matched = true
+			case *Username, *Group:
+				if !node.IsTagged() && node.User().Valid() {
+					owner, ok := target.(Owner)
+					matched = ok && pm.userMatchesOwner(node.User(), owner)
+				}
+			case *Tag:
+				matched = node.HasTag(string(*t))
+			case *AutoGroup:
+				matched = (*t == AutoGroupMember && !node.IsTagged()) ||
+					(*t == AutoGroupTagged && node.IsTagged())
+			}
+			if matched {
+				break
+			}
+		}
+		if matched {
+			selected = append(selected, grant.IPPool...)
+		}
+	}
+	return selected, reserved
 }
 
 // Filter returns the current filter rules for the entire tailnet and the associated matchers.

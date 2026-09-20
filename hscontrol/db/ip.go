@@ -35,8 +35,9 @@ type IPAllocator struct {
 	prefix6 *netip.Prefix
 
 	// Previous IPs handed out
-	prev4 netip.Addr
-	prev6 netip.Addr
+	prev4     netip.Addr
+	prev6     netip.Addr
+	poolPrev4 map[netip.Prefix]netip.Addr
 
 	// strategy used for handing out IP addresses.
 	strategy types.IPAllocationStrategy
@@ -63,7 +64,8 @@ func NewIPAllocator(
 		prefix4: prefix4,
 		prefix6: prefix6,
 
-		strategy: strategy,
+		strategy:  strategy,
+		poolPrev4: make(map[netip.Prefix]netip.Addr),
 	}
 
 	var (
@@ -138,6 +140,12 @@ func NewIPAllocator(
 }
 
 func (i *IPAllocator) Next() (*netip.Addr, *netip.Addr, error) {
+	return i.NextForPools(nil, nil)
+}
+
+// NextForPools allocates IPv4 from the selected pools, or from the ordinary
+// prefix excluding all reserved pools when selected is empty.
+func (i *IPAllocator) NextForPools(selected, reserved []netip.Prefix) (*netip.Addr, *netip.Addr, error) {
 	var (
 		err  error
 		ret4 *netip.Addr
@@ -145,7 +153,11 @@ func (i *IPAllocator) Next() (*netip.Addr, *netip.Addr, error) {
 	)
 
 	if i.prefix4 != nil {
-		ret4, err = i.allocateNext(&i.prev4, i.prefix4)
+		if len(selected) == 0 {
+			ret4, err = i.allocateNextExcluding(&i.prev4, i.prefix4, reserved)
+		} else {
+			ret4, err = i.allocateFromPools(selected)
+		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("allocating IPv4 address: %w", err)
 		}
@@ -168,10 +180,14 @@ var ErrCouldNotAllocateIP = errors.New("failed to allocate IP")
 // already-issued addresses, and so prev is read under the lock rather than in
 // the caller's frame.
 func (i *IPAllocator) allocateNext(prev *netip.Addr, prefix *netip.Prefix) (*netip.Addr, error) {
+	return i.allocateNextExcluding(prev, prefix, nil)
+}
+
+func (i *IPAllocator) allocateNextExcluding(prev *netip.Addr, prefix *netip.Prefix, excluded []netip.Prefix) (*netip.Addr, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
-	ret, err := i.next(*prev, prefix)
+	ret, err := i.nextExcluding(*prev, prefix, excluded)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +197,38 @@ func (i *IPAllocator) allocateNext(prev *netip.Addr, prefix *netip.Prefix) (*net
 	return ret, nil
 }
 
+func (i *IPAllocator) allocateFromPools(pools []netip.Prefix) (*netip.Addr, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	for _, pool := range pools {
+		pool = pool.Masked()
+		if i.prefix4 == nil || pool.Bits() < i.prefix4.Bits() ||
+			!i.prefix4.Contains(pool.Addr()) {
+			return nil, fmt.Errorf("%w: %s", errGeneratedIPNotInPrefix, pool)
+		}
+		prev, ok := i.poolPrev4[pool]
+		if !ok {
+			prev = pool.Addr()
+		}
+		ip, err := i.nextExcluding(prev, &pool, nil)
+		if errors.Is(err, ErrCouldNotAllocateIP) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		i.poolPrev4[pool] = *ip
+		return ip, nil
+	}
+	return nil, ErrCouldNotAllocateIP
+}
+
 func (i *IPAllocator) next(prev netip.Addr, prefix *netip.Prefix) (*netip.Addr, error) {
+	return i.nextExcluding(prev, prefix, nil)
+}
+
+func (i *IPAllocator) nextExcluding(prev netip.Addr, prefix *netip.Prefix, excluded []netip.Prefix) (*netip.Addr, error) {
 	var (
 		err error
 		ip  netip.Addr
@@ -210,14 +257,27 @@ func (i *IPAllocator) next(prev netip.Addr, prefix *netip.Prefix) (*netip.Addr, 
 	// the loop finite, so an exhausted prefix returns ErrCouldNotAllocateIP
 	// instead of re-drawing in-prefix addresses forever under i.mu.
 	start := ip
+	network, broadcast := util.GetIPPrefixEndpoints(*prefix)
 	for {
-		if prefix.Contains(ip) && !set.Contains(ip) && !isTailscaleReservedIP(ip) {
+		blocked := false
+		for _, pool := range excluded {
+			if pool.Contains(ip) {
+				blocked = true
+				if i.strategy == types.IPAllocationStrategySequential {
+					ip = netipx.RangeOfPrefix(pool).To().Next()
+				}
+				break
+			}
+		}
+		if !blocked && prefix.Contains(ip) && ip != network && ip != broadcast && !set.Contains(ip) && !isTailscaleReservedIP(ip) {
 			i.usedIPs.Add(ip)
 
 			return &ip, nil
 		}
 
-		ip = ip.Next()
+		if !blocked || i.strategy != types.IPAllocationStrategySequential {
+			ip = ip.Next()
+		}
 
 		switch i.strategy {
 		case types.IPAllocationStrategySequential:
@@ -303,7 +363,10 @@ func isTailscaleReservedIP(ip netip.Addr) bool {
 // it will be added.
 // If a prefix type has been removed (IPv4 or IPv6), it
 // will remove the IPs in that family from the node.
-func (db *HSDatabase) BackfillNodeIPs(i *IPAllocator) ([]string, error) {
+func (db *HSDatabase) BackfillNodeIPs(
+	i *IPAllocator,
+	poolForNode ...func(types.NodeView) ([]netip.Prefix, []netip.Prefix),
+) ([]string, error) {
 	var (
 		err error
 		ret []string
@@ -325,9 +388,18 @@ func (db *HSDatabase) BackfillNodeIPs(i *IPAllocator) ([]string, error) {
 			log.Trace().Caller().EmbedObject(node).Msg("ip backfill check started because node found in database")
 
 			changed := false
+			var selected, reserved []netip.Prefix
+			if len(poolForNode) > 0 {
+				selected, reserved = poolForNode[0](node.View())
+			}
 			// IPv4 prefix is set, but node ip is missing, alloc
 			if i.prefix4 != nil && node.IPv4 == nil {
-				ret4, err := i.allocateNext(&i.prev4, i.prefix4)
+				var ret4 *netip.Addr
+				if len(selected) == 0 {
+					ret4, err = i.allocateNextExcluding(&i.prev4, i.prefix4, reserved)
+				} else {
+					ret4, err = i.allocateFromPools(selected)
+				}
 				if err != nil {
 					return fmt.Errorf("allocating IPv4 for node(%d): %w", node.ID, err)
 				}

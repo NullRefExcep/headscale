@@ -25,6 +25,7 @@ type PolicyManager interface {
 	// from the current policy, avoiding trust of client-provided URL params.
 	SSHCheckParams(srcNodeID, dstNodeID types.NodeID) (time.Duration, bool)
 	SetPolicy(pol []byte) (bool, error)
+	IPPoolsForNode(node types.NodeView) ([]netip.Prefix, []netip.Prefix)
 	// SetUsers replaces the user list. policyChanged reports whether clients
 	// need a policy refresh; peerMapChanged reports whether user-derived peer
 	// adjacency may have changed. Both are false when the list is unchanged.
@@ -95,13 +96,13 @@ type PolicyManager interface {
 }
 
 // NewPolicyManager returns a new [PolicyManager].
-func NewPolicyManager(pol []byte, users []types.User, nodes views.Slice[types.NodeView]) (PolicyManager, error) {
+func NewPolicyManager(pol []byte, users []types.User, nodes views.Slice[types.NodeView], ipPoolPrefix ...*netip.Prefix) (PolicyManager, error) {
 	var (
 		polMan PolicyManager
 		err    error
 	)
 
-	polMan, err = policyv2.NewPolicyManager(pol, users, nodes)
+	polMan, err = policyv2.NewPolicyManager(pol, users, nodes, ipPoolPrefix...)
 	if err != nil {
 		return nil, err
 	}

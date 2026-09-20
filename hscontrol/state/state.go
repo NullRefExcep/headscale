@@ -262,7 +262,7 @@ func NewState(cfg *types.Config) (*State, error) {
 		return nil, fmt.Errorf("loading policy: %w", err)
 	}
 
-	polMan, err := policy.NewPolicyManager(pol, users, nodes.ViewSlice())
+	polMan, err := policy.NewPolicyManager(pol, users, nodes.ViewSlice(), cfg.PrefixV4)
 	if err != nil {
 		return nil, fmt.Errorf("initializing policy manager: %w", err)
 	}
@@ -1142,7 +1142,7 @@ func (s *State) RenameNode(nodeID types.NodeID, newName string) (types.NodeView,
 func (s *State) BackfillNodeIPs() ([]string, []change.Change, error) {
 	genBefore := s.polMan.NodesGeneration()
 
-	changes, err := s.db.BackfillNodeIPs(s.ipAlloc)
+	changes, err := s.db.BackfillNodeIPs(s.ipAlloc, s.polMan.IPPoolsForNode)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2151,7 +2151,8 @@ func (s *State) createAndSaveNewNode(params newNodeParams) (types.NodeView, erro
 	}
 
 	// Allocate new IPs
-	ipv4, ipv6, err := s.ipAlloc.Next()
+	selectedPools, reservedPools := s.polMan.IPPoolsForNode(nodeToRegister.View())
+	ipv4, ipv6, err := s.ipAlloc.NextForPools(selectedPools, reservedPools)
 	if err != nil {
 		return types.NodeView{}, fmt.Errorf("allocating IPs: %w", err)
 	}

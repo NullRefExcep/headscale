@@ -227,6 +227,27 @@ configuration and attributes. At least the following node attributes are current
 }
 ```
 
+### IPv4 pools
+
+Use `ipPool` in a `nodeAttrs` entry to choose the IPv4 range for newly registered nodes. Targets may be users,
+groups, tags, `autogroup:member`, `autogroup:tagged`, or `*`. Multiple matching entries make all their pools
+available. A node without a matching entry receives an address from the configured `prefixes.v4`, excluding every
+pool declared in the policy. Existing node addresses do not change when the policy changes.
+
+Each pool must fit inside `prefixes.v4` and the Tailscale CGNAT range, and must avoid reserved Tailscale ranges.
+IPv6 allocation is unaffected. Registration fails if every matching pool is full.
+
+```json title="policy.json"
+{
+  "groups": {"group:dev": ["alice@example.com"]},
+  "tagOwners": {"tag:server": ["alice@example.com"]},
+  "nodeAttrs": [
+    {"target": ["group:dev"], "ipPool": ["100.81.0.0/16"]},
+    {"target": ["tag:server"], "ipPool": ["100.85.0.0/16"]}
+  ]
+}
+```
+
 ## Network-wide policy options
 
 The following options are applied for the entire tailnet. Consider [node attributes](#node-attributes) for a more
