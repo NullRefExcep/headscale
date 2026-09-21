@@ -1169,10 +1169,12 @@ func (s *State) BackfillNodeIPs() ([]string, []change.Change, error) {
 				// TODO(kradalby): We should ensure we use the same hostinfo and node merge semantics
 				// when a node re-registers as we do when it sends a map request (UpdateNodeFromMapRequest).
 
-				// Preserve NetInfo from existing node to prevent loss during backfill
-				netInfo := netInfoFromMapRequest(node.ID, existingNode.Hostinfo().AsStruct(), node.Hostinfo)
-				node.Hostinfo = existingNode.Hostinfo().AsStruct()
-				node.Hostinfo.NetInfo = netInfo
+				// Preserve NetInfo from existing node to prevent loss during backfill.
+				// Newly registered nodes may not have Hostinfo yet.
+				if hostinfo := existingNode.Hostinfo().AsStruct(); hostinfo != nil {
+					hostinfo.NetInfo = netInfoFromMapRequest(node.ID, hostinfo, node.Hostinfo)
+					node.Hostinfo = hostinfo
+				}
 			}
 			// TODO(kradalby): This should just update the IP addresses, nothing else in the node store.
 			// We should avoid [NodeStore.PutNode] here.
