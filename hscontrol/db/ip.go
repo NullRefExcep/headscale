@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/netip"
+	"slices"
 	"sync"
 
 	"github.com/juanfont/headscale/hscontrol/types"
@@ -21,6 +22,12 @@ var (
 	errGeneratedIPBytesInvalid = errors.New("generated ip bytes are invalid ip")
 	errGeneratedIPNotInPrefix  = errors.New("generated ip not in prefix")
 	errIPAllocatorNil          = errors.New("ip allocator was nil")
+	// Tailscale reserves these CGNAT ranges for internal services.
+	// See https://tailscale.com/docs/reference/ip-pool.
+	reservedTailscaleIPv4Ranges = []netip.Prefix{
+		netip.MustParsePrefix("100.100.0.0/24"),
+		netip.MustParsePrefix("100.100.100.0/24"),
+	}
 )
 
 // IPAllocator is a singleton responsible for allocating
@@ -351,7 +358,8 @@ func randomNext(pfx netip.Prefix) (netip.Addr, error) {
 func isTailscaleReservedIP(ip netip.Addr) bool {
 	return tsaddr.ChromeOSVMRange().Contains(ip) ||
 		tsaddr.TailscaleServiceIP() == ip ||
-		tsaddr.TailscaleServiceIPv6() == ip
+		tsaddr.TailscaleServiceIPv6() == ip ||
+		(ip.Is4() && slices.ContainsFunc(reservedTailscaleIPv4Ranges, func(p netip.Prefix) bool { return p.Contains(ip) }))
 }
 
 // BackfillNodeIPs will take a database transaction, and
