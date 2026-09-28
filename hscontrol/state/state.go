@@ -2154,6 +2154,7 @@ func (s *State) createAndSaveNewNode(params newNodeParams) (types.NodeView, erro
 
 	// Allocate new IPs
 	selectedPools, reservedPools := s.polMan.IPPoolsForNode(nodeToRegister.View())
+
 	ipv4, ipv6, err := s.ipAlloc.NextForPools(selectedPools, reservedPools)
 	if err != nil {
 		return types.NodeView{}, fmt.Errorf("allocating IPs: %w", err)

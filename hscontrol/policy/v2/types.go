@@ -2682,10 +2682,12 @@ func (p *Policy) validate() error {
 				errs = append(errs, err)
 			}
 		}
+
 		if len(na.IPPool) > 0 {
 			if len(na.Targets) == 0 {
 				errs = append(errs, ErrNodeAttrsIPPoolTarget)
 			}
+
 			for _, target := range na.Targets {
 				switch target.(type) {
 				case *Username, *Group, *Tag, *AutoGroup, Asterix:

@@ -29,6 +29,8 @@ import (
 // ErrInvalidTagOwner is returned when a tag owner is not an [Alias] type.
 var ErrInvalidTagOwner = errors.New("tag owner is not an Alias")
 
+var errIPPoolOutsideConfiguredPrefix = errors.New("nodeAttrs ipPool is outside configured IPv4 prefix")
+
 type PolicyManager struct {
 	// RWMutex, not Mutex, so concurrent map generation does not serialise on
 	// reads. The per-node caches are xsync.Maps so a read can fill them without
@@ -224,6 +226,7 @@ func NewPolicyManager(b []byte, users []types.User, nodes views.Slice[types.Node
 	if len(ipPoolPrefix) > 0 {
 		pm.ipPoolPrefix = ipPoolPrefix[0]
 		pm.ipPoolPrefixConfigured = true
+
 		err = pm.validateIPPoolPrefix(policy)
 		if err != nil {
 			return nil, err
@@ -593,6 +596,7 @@ func (pm *PolicyManager) SetPolicy(polB []byte) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("validating policy user references: %w", err)
 	}
+
 	err = pm.validateIPPoolPrefix(pol)
 	if err != nil {
 		return false, err
@@ -644,15 +648,17 @@ func (pm *PolicyManager) validateIPPoolPrefix(pol *Policy) error {
 	if !pm.ipPoolPrefixConfigured || pol == nil {
 		return nil
 	}
+
 	for _, grant := range pol.NodeAttrs {
 		for _, pool := range grant.IPPool {
 			if pm.ipPoolPrefix == nil ||
 				pool.Bits() < pm.ipPoolPrefix.Bits() ||
 				!pm.ipPoolPrefix.Contains(pool.Masked().Addr()) {
-				return fmt.Errorf("nodeAttrs ipPool %s is outside configured IPv4 prefix", pool)
+				return fmt.Errorf("%w: %s", errIPPoolOutsideConfiguredPrefix, pool)
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -667,12 +673,15 @@ func (pm *PolicyManager) IPPoolsForNode(node types.NodeView) ([]netip.Prefix, []
 	}
 
 	var selected, reserved []netip.Prefix
+
 	for _, grant := range pm.pol.NodeAttrs {
 		if len(grant.IPPool) == 0 {
 			continue
 		}
+
 		reserved = append(reserved, grant.IPPool...)
 		matched := false
+
 		for _, target := range grant.Targets {
 			switch t := target.(type) {
 			case Asterix:
@@ -688,14 +697,17 @@ func (pm *PolicyManager) IPPoolsForNode(node types.NodeView) ([]netip.Prefix, []
 				matched = (*t == AutoGroupMember && !node.IsTagged()) ||
 					(*t == AutoGroupTagged && node.IsTagged())
 			}
+
 			if matched {
 				break
 			}
 		}
+
 		if matched {
 			selected = append(selected, grant.IPPool...)
 		}
 	}
+
 	return selected, reserved
 }
 

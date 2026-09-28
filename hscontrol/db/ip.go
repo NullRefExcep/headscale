@@ -214,20 +214,26 @@ func (i *IPAllocator) allocateFromPools(pools []netip.Prefix) (*netip.Addr, erro
 			!i.prefix4.Contains(pool.Addr()) {
 			return nil, fmt.Errorf("%w: %s", errGeneratedIPNotInPrefix, pool)
 		}
+
 		prev, ok := i.poolPrev4[pool]
 		if !ok {
 			prev = pool.Addr()
 		}
+
 		ip, err := i.nextExcluding(prev, &pool, nil)
 		if errors.Is(err, ErrCouldNotAllocateIP) {
 			continue
 		}
+
 		if err != nil {
 			return nil, err
 		}
+
 		i.poolPrev4[pool] = *ip
+
 		return ip, nil
 	}
+
 	return nil, ErrCouldNotAllocateIP
 }
 
@@ -267,15 +273,19 @@ func (i *IPAllocator) nextExcluding(prev netip.Addr, prefix *netip.Prefix, exclu
 	network, broadcast := util.GetIPPrefixEndpoints(*prefix)
 	for {
 		blocked := false
+
 		for _, pool := range excluded {
 			if pool.Contains(ip) {
 				blocked = true
+
 				if i.strategy == types.IPAllocationStrategySequential {
 					ip = netipx.RangeOfPrefix(pool).To().Next()
 				}
+
 				break
 			}
 		}
+
 		if !blocked && prefix.Contains(ip) && ip != network && ip != broadcast && !set.Contains(ip) && !isTailscaleReservedIP(ip) {
 			i.usedIPs.Add(ip)
 
@@ -396,10 +406,12 @@ func (db *HSDatabase) BackfillNodeIPs(
 			log.Trace().Caller().EmbedObject(node).Msg("ip backfill check started because node found in database")
 
 			changed := false
+
 			var selected, reserved []netip.Prefix
 			if len(poolForNode) > 0 {
 				selected, reserved = poolForNode[0](node.View())
 			}
+
 			// IPv4 prefix is set, but node ip is missing, alloc
 			if i.prefix4 != nil && node.IPv4 == nil {
 				var ret4 *netip.Addr

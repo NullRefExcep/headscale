@@ -93,6 +93,7 @@ func TestRegistrationIPPool(t *testing.T) {
 
 	database, err := db.NewHeadscaleDatabase(cfg)
 	require.NoError(t, err)
+
 	alice := database.CreateUserForTest("alice")
 	bob := database.CreateUserForTest("bob")
 	require.NoError(t, database.Close())
@@ -117,17 +118,21 @@ func TestRegistrationIPPool(t *testing.T) {
 			RegisterMethod: util.RegisterMethodCLI,
 		})
 		require.NoError(t, err)
+
 		return node
 	}
 
 	dev := register(alice, "dev")
 	ordinary := register(bob, "ordinary")
+
 	require.Equal(t, netip.MustParseAddr("100.81.0.1"), dev.IPv4().Get())
 	require.Equal(t, netip.MustParseAddr("100.81.0.4"), ordinary.IPv4().Get())
+
 	missing := s.db.CreateNodeForTest(alice, "missing")
 	_, _, err = s.BackfillNodeIPs()
 	require.NoError(t, err)
-	filled, err := s.db.GetNodeByID(types.NodeID(missing.ID))
+
+	filled, err := s.db.GetNodeByID(missing.ID)
 	require.NoError(t, err)
 	require.Equal(t, netip.MustParseAddr("100.81.0.2"), *filled.IPv4)
 

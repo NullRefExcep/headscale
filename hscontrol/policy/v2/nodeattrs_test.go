@@ -308,6 +308,7 @@ func TestNodeAttrsIPPoolSelection(t *testing.T) {
 	before, _ := pm.IPPoolsForNode(userNode.View())
 	_, err = pm.SetPolicy([]byte(`{"nodeAttrs": [{"target": ["*"], "ipPool": ["100.100.0.0/24"]}]}`))
 	require.ErrorIs(t, err, ErrNodeAttrsIPPoolReserved)
+
 	after, _ := pm.IPPoolsForNode(userNode.View())
 	assert.Equal(t, before, after)
 }
