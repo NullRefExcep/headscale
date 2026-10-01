@@ -282,34 +282,34 @@ func TestNodeAttrsIPPoolSelection(t *testing.T) {
 		]
 	}`
 	configured := netip.MustParsePrefix("100.64.0.0/10")
-	pm, err := NewPolicyManager([]byte(policy), users, types.Nodes{}.ViewSlice(), &configured)
+	pm, err := NewPolicyManagerWithIPv4Prefix([]byte(policy), users, types.Nodes{}.ViewSlice(), &configured)
 	require.NoError(t, err)
 
 	userNode := types.Node{User: &users[0], UserID: &users[0].ID}
-	selected, reserved := pm.IPPoolsForNode(userNode.View())
-	assert.Equal(t, []netip.Prefix{netip.MustParsePrefix("100.81.0.0/16")}, selected)
-	assert.Len(t, reserved, 2)
+	selection := pm.IPPoolSelectionForNode(userNode.View())
+	assert.Equal(t, []netip.Prefix{netip.MustParsePrefix("100.81.0.0/16")}, selection.Matched)
+	assert.Len(t, selection.Declared, 2)
 
 	taggedNode := types.Node{Tags: []string{"tag:server"}}
-	selected, _ = pm.IPPoolsForNode(taggedNode.View())
-	assert.Equal(t, []netip.Prefix{netip.MustParsePrefix("100.85.0.0/16")}, selected)
+	selection = pm.IPPoolSelectionForNode(taggedNode.View())
+	assert.Equal(t, []netip.Prefix{netip.MustParsePrefix("100.85.0.0/16")}, selection.Matched)
 
 	otherNode := types.Node{User: &users[1], UserID: &users[1].ID}
-	selected, _ = pm.IPPoolsForNode(otherNode.View())
-	assert.Empty(t, selected)
+	selection = pm.IPPoolSelectionForNode(otherNode.View())
+	assert.Empty(t, selection.Matched)
 
 	tooSmall := netip.MustParsePrefix("100.80.0.0/16")
-	_, err = NewPolicyManager([]byte(policy), users, types.Nodes{}.ViewSlice(), &tooSmall)
+	_, err = NewPolicyManagerWithIPv4Prefix([]byte(policy), users, types.Nodes{}.ViewSlice(), &tooSmall)
 	require.ErrorContains(t, err, "outside configured IPv4 prefix")
 
-	_, err = NewPolicyManager([]byte(policy), users, types.Nodes{}.ViewSlice(), nil)
+	_, err = NewPolicyManagerWithIPv4Prefix([]byte(policy), users, types.Nodes{}.ViewSlice(), nil)
 	require.ErrorContains(t, err, "outside configured IPv4 prefix")
 
-	before, _ := pm.IPPoolsForNode(userNode.View())
+	before := pm.IPPoolSelectionForNode(userNode.View())
 	_, err = pm.SetPolicy([]byte(`{"nodeAttrs": [{"target": ["*"], "ipPool": ["100.100.0.0/24"]}]}`))
 	require.ErrorIs(t, err, ErrNodeAttrsIPPoolReserved)
 
-	after, _ := pm.IPPoolsForNode(userNode.View())
+	after := pm.IPPoolSelectionForNode(userNode.View())
 	assert.Equal(t, before, after)
 }
 

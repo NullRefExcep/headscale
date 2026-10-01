@@ -25,7 +25,7 @@ type PolicyManager interface {
 	// from the current policy, avoiding trust of client-provided URL params.
 	SSHCheckParams(srcNodeID, dstNodeID types.NodeID) (time.Duration, bool)
 	SetPolicy(pol []byte) (bool, error)
-	IPPoolsForNode(node types.NodeView) ([]netip.Prefix, []netip.Prefix)
+	IPPoolSelectionForNode(node types.NodeView) policyv2.IPPoolSelection
 	// SetUsers replaces the user list. policyChanged reports whether clients
 	// need a policy refresh; peerMapChanged reports whether user-derived peer
 	// adjacency may have changed. Both are false when the list is unchanged.
@@ -95,19 +95,27 @@ type PolicyManager interface {
 	DebugString() string
 }
 
-// NewPolicyManager returns a new [PolicyManager].
-func NewPolicyManager(pol []byte, users []types.User, nodes views.Slice[types.NodeView], ipPoolPrefix ...*netip.Prefix) (PolicyManager, error) {
-	var (
-		polMan PolicyManager
-		err    error
-	)
+// NewPolicyManager returns a policy manager without server network
+// configuration. Call [NewPolicyManagerWithIPv4Prefix] in a running server so
+// nodeAttrs ipPool entries are checked against the configured prefix.
+func NewPolicyManager(pol []byte, users []types.User, nodes views.Slice[types.NodeView]) (PolicyManager, error) {
+	return policyv2.NewPolicyManager(pol, users, nodes)
+}
 
-	polMan, err = policyv2.NewPolicyManager(pol, users, nodes, ipPoolPrefix...)
+// NewPolicyManagerWithIPv4Prefix returns the policy manager used by a running
+// server. Passing nil explicitly represents disabled IPv4 allocation.
+func NewPolicyManagerWithIPv4Prefix(
+	pol []byte,
+	users []types.User,
+	nodes views.Slice[types.NodeView],
+	ipv4Prefix *netip.Prefix,
+) (PolicyManager, error) {
+	polMan, err := policyv2.NewPolicyManagerWithIPv4Prefix(pol, users, nodes, ipv4Prefix)
 	if err != nil {
 		return nil, err
 	}
 
-	return polMan, err
+	return polMan, nil
 }
 
 // PolicyManagersForTest returns all available [PolicyManager] implementations to

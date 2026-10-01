@@ -200,10 +200,33 @@ func validateUserReferences(pol *Policy, users types.Users) error {
 	return multierr.New(errs...)
 }
 
-// NewPolicyManager creates a new [PolicyManager] from a policy file and a list of users and nodes.
-// It returns an error if the policy file is invalid.
-// The policy manager will update the filter rules based on the users and nodes.
-func NewPolicyManager(b []byte, users []types.User, nodes views.Slice[types.NodeView], ipPoolPrefix ...*netip.Prefix) (*PolicyManager, error) {
+// NewPolicyManager creates a policy manager without server network
+// configuration. It is intended for policy evaluation in tests and tools that
+// do not allocate node addresses.
+func NewPolicyManager(b []byte, users []types.User, nodes views.Slice[types.NodeView]) (*PolicyManager, error) {
+	return newPolicyManager(b, users, nodes, nil, false)
+}
+
+// NewPolicyManagerWithIPv4Prefix creates a policy manager for a running
+// server. It validates every nodeAttrs ipPool against ipv4Prefix. A nil prefix
+// means that IPv4 allocation is disabled, so a policy containing ipPool is
+// rejected.
+func NewPolicyManagerWithIPv4Prefix(
+	b []byte,
+	users []types.User,
+	nodes views.Slice[types.NodeView],
+	ipv4Prefix *netip.Prefix,
+) (*PolicyManager, error) {
+	return newPolicyManager(b, users, nodes, ipv4Prefix, true)
+}
+
+func newPolicyManager(
+	b []byte,
+	users []types.User,
+	nodes views.Slice[types.NodeView],
+	ipv4Prefix *netip.Prefix,
+	validateIPPoolPrefix bool,
+) (*PolicyManager, error) {
 	policy, err := unmarshalPolicy(b)
 	if err != nil {
 		return nil, fmt.Errorf("parsing policy: %w", err)
@@ -223,8 +246,8 @@ func NewPolicyManager(b []byte, users []types.User, nodes views.Slice[types.Node
 		filterRulesMap:     xsync.NewMap[types.NodeID, []tailcfg.FilterRule](),
 		matchersForNodeMap: xsync.NewMap[types.NodeID, []matcher.Match](),
 	}
-	if len(ipPoolPrefix) > 0 {
-		pm.ipPoolPrefix = ipPoolPrefix[0]
+	if validateIPPoolPrefix {
+		pm.ipPoolPrefix = ipv4Prefix
 		pm.ipPoolPrefixConfigured = true
 
 		err = pm.validateIPPoolPrefix(policy)
@@ -662,24 +685,34 @@ func (pm *PolicyManager) validateIPPoolPrefix(pol *Policy) error {
 	return nil
 }
 
-// IPPoolsForNode returns the pools selected for a node and all pools reserved
-// from ordinary allocation. A new node can be matched before it has an IP.
-func (pm *PolicyManager) IPPoolsForNode(node types.NodeView) ([]netip.Prefix, []netip.Prefix) {
+// IPPoolSelection describes how nodeAttrs ipPool applies to one node.
+//
+// Matched contains pools from entries targeting the node. Declared contains
+// every pool in the policy; the allocator excludes these pools when Matched is
+// empty so ordinary nodes receive addresses from the rest of prefixes.v4.
+type IPPoolSelection struct {
+	Matched  []netip.Prefix
+	Declared []netip.Prefix
+}
+
+// IPPoolSelectionForNode resolves policy targets without relying on a node IP,
+// allowing it to be used during initial registration and IP backfill.
+func (pm *PolicyManager) IPPoolSelectionForNode(node types.NodeView) IPPoolSelection {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
 	if pm.pol == nil {
-		return nil, nil
+		return IPPoolSelection{}
 	}
 
-	var selected, reserved []netip.Prefix
+	var selection IPPoolSelection
 
 	for _, grant := range pm.pol.NodeAttrs {
 		if len(grant.IPPool) == 0 {
 			continue
 		}
 
-		reserved = append(reserved, grant.IPPool...)
+		selection.Declared = append(selection.Declared, grant.IPPool...)
 		matched := false
 
 		for _, target := range grant.Targets {
@@ -704,11 +737,11 @@ func (pm *PolicyManager) IPPoolsForNode(node types.NodeView) ([]netip.Prefix, []
 		}
 
 		if matched {
-			selected = append(selected, grant.IPPool...)
+			selection.Matched = append(selection.Matched, grant.IPPool...)
 		}
 	}
 
-	return selected, reserved
+	return selection
 }
 
 // Filter returns the current filter rules for the entire tailnet and the associated matchers.

@@ -147,12 +147,21 @@ func NewIPAllocator(
 }
 
 func (i *IPAllocator) Next() (*netip.Addr, *netip.Addr, error) {
-	return i.NextForPools(nil, nil)
+	return i.NextFor(IPAllocationRequest{})
 }
 
-// NextForPools allocates IPv4 from the selected pools, or from the ordinary
-// prefix excluding all reserved pools when selected is empty.
-func (i *IPAllocator) NextForPools(selected, reserved []netip.Prefix) (*netip.Addr, *netip.Addr, error) {
+// IPAllocationRequest describes the policy constraints for one allocation.
+// When IPv4Pools is empty, the allocator uses its configured IPv4 prefix and
+// skips ExcludedIPv4Pools. When IPv4Pools is non-empty, it tries those pools in
+// order and fails if all of them are exhausted.
+type IPAllocationRequest struct {
+	IPv4Pools         []netip.Prefix
+	ExcludedIPv4Pools []netip.Prefix
+}
+
+// NextFor allocates addresses satisfying request. IPv6 allocation is
+// unaffected by IPv4 pool selection.
+func (i *IPAllocator) NextFor(request IPAllocationRequest) (*netip.Addr, *netip.Addr, error) {
 	var (
 		err  error
 		ret4 *netip.Addr
@@ -160,11 +169,12 @@ func (i *IPAllocator) NextForPools(selected, reserved []netip.Prefix) (*netip.Ad
 	)
 
 	if i.prefix4 != nil {
-		if len(selected) == 0 {
-			ret4, err = i.allocateNextExcluding(&i.prev4, i.prefix4, reserved)
+		if len(request.IPv4Pools) == 0 {
+			ret4, err = i.allocateNextExcluding(&i.prev4, i.prefix4, request.ExcludedIPv4Pools)
 		} else {
-			ret4, err = i.allocateFromPools(selected)
+			ret4, err = i.allocateFromPools(request.IPv4Pools)
 		}
+
 		if err != nil {
 			return nil, nil, fmt.Errorf("allocating IPv4 address: %w", err)
 		}
@@ -271,6 +281,7 @@ func (i *IPAllocator) nextExcluding(prev netip.Addr, prefix *netip.Prefix, exclu
 	// instead of re-drawing in-prefix addresses forever under i.mu.
 	start := ip
 	network, broadcast := util.GetIPPrefixEndpoints(*prefix)
+
 	for {
 		blocked := false
 
@@ -372,18 +383,18 @@ func isTailscaleReservedIP(ip netip.Addr) bool {
 		(ip.Is4() && slices.ContainsFunc(reservedTailscaleIPv4Ranges, func(p netip.Prefix) bool { return p.Contains(ip) }))
 }
 
-// BackfillNodeIPs will take a database transaction, and
-// iterate through all of the current nodes ([types.Node]) in headscale
-// and ensure it has IP addresses according to the current
-// configuration.
-// This means that if both IPv4 and IPv6 is set in the
-// config, and some nodes are missing that type of IP,
-// it will be added.
-// If a prefix type has been removed (IPv4 or IPv6), it
-// will remove the IPs in that family from the node.
+// IPAllocationRequestForNode resolves policy constraints for a node that is
+// missing an address. A nil resolver means ordinary allocation without policy
+// pools, which keeps the database helper usable in isolation.
+type IPAllocationRequestForNode func(types.NodeView) IPAllocationRequest
+
+// BackfillNodeIPs runs a database transaction that makes every node's address
+// families match the current server configuration. Missing addresses are
+// allocated using requestForNode; addresses from disabled families are
+// removed.
 func (db *HSDatabase) BackfillNodeIPs(
 	i *IPAllocator,
-	poolForNode ...func(types.NodeView) ([]netip.Prefix, []netip.Prefix),
+	requestForNode IPAllocationRequestForNode,
 ) ([]string, error) {
 	var (
 		err error
@@ -407,19 +418,20 @@ func (db *HSDatabase) BackfillNodeIPs(
 
 			changed := false
 
-			var selected, reserved []netip.Prefix
-			if len(poolForNode) > 0 {
-				selected, reserved = poolForNode[0](node.View())
+			var request IPAllocationRequest
+			if requestForNode != nil {
+				request = requestForNode(node.View())
 			}
 
 			// IPv4 prefix is set, but node ip is missing, alloc
 			if i.prefix4 != nil && node.IPv4 == nil {
 				var ret4 *netip.Addr
-				if len(selected) == 0 {
-					ret4, err = i.allocateNextExcluding(&i.prev4, i.prefix4, reserved)
+				if len(request.IPv4Pools) == 0 {
+					ret4, err = i.allocateNextExcluding(&i.prev4, i.prefix4, request.ExcludedIPv4Pools)
 				} else {
-					ret4, err = i.allocateFromPools(selected)
+					ret4, err = i.allocateFromPools(request.IPv4Pools)
 				}
+
 				if err != nil {
 					return fmt.Errorf("allocating IPv4 for node(%d): %w", node.ID, err)
 				}

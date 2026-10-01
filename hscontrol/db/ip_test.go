@@ -192,22 +192,22 @@ func TestIPAllocatorPools(t *testing.T) {
 	alloc, err := NewIPAllocator(nil, &prefix, nil, types.IPAllocationStrategySequential)
 	require.NoError(t, err)
 
-	ordinary, _, err := alloc.NextForPools(nil, []netip.Prefix{pool})
+	ordinary, _, err := alloc.NextFor(IPAllocationRequest{ExcludedIPv4Pools: []netip.Prefix{pool}})
 	require.NoError(t, err)
 	assert.Equal(t, na("100.81.0.4"), *ordinary)
 
-	first, _, err := alloc.NextForPools([]netip.Prefix{pool}, []netip.Prefix{pool})
+	first, _, err := alloc.NextFor(IPAllocationRequest{IPv4Pools: []netip.Prefix{pool}})
 	require.NoError(t, err)
 	assert.Equal(t, na("100.81.0.1"), *first)
 
-	second, _, err := alloc.NextForPools([]netip.Prefix{pool}, []netip.Prefix{pool})
+	second, _, err := alloc.NextFor(IPAllocationRequest{IPv4Pools: []netip.Prefix{pool}})
 	require.NoError(t, err)
 	assert.Equal(t, na("100.81.0.2"), *second)
 
-	_, _, err = alloc.NextForPools([]netip.Prefix{pool}, []netip.Prefix{pool})
+	_, _, err = alloc.NextFor(IPAllocationRequest{IPv4Pools: []netip.Prefix{pool}})
 	require.ErrorIs(t, err, ErrCouldNotAllocateIP)
 
-	ordinary, _, err = alloc.NextForPools(nil, []netip.Prefix{pool})
+	ordinary, _, err = alloc.NextFor(IPAllocationRequest{ExcludedIPv4Pools: []netip.Prefix{pool}})
 	require.NoError(t, err)
 	assert.Equal(t, na("100.81.0.5"), *ordinary)
 }
@@ -489,7 +489,7 @@ func TestBackfillIPAddresses(t *testing.T) {
 				t.Fatalf("failed to set up ip alloc: %s", err)
 			}
 
-			logs, err := db.BackfillNodeIPs(alloc)
+			logs, err := db.BackfillNodeIPs(alloc, nil)
 			if err != nil {
 				t.Fatalf("failed to backfill: %s", err)
 			}
@@ -542,5 +542,4 @@ func TestIPAllocatorNextNoReservedIPs(t *testing.T) {
 	nextQuad100v6, err := alloc.next(na("fd7a:115c:a1e0::52"), new(tsaddr.TailscaleULARange()))
 	require.NoError(t, err)
 	assert.Equal(t, na("fd7a:115c:a1e0::54"), *nextQuad100v6)
-
 }
