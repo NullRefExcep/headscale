@@ -11,6 +11,7 @@ import (
 	"time"
 
 	clientv1 "github.com/juanfont/headscale/gen/client/v1"
+	policyv2 "github.com/juanfont/headscale/hscontrol/policy/v2"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/juanfont/headscale/integration/hsic"
 	"github.com/juanfont/headscale/integration/integrationutil"
@@ -24,6 +25,142 @@ import (
 	"tailscale.com/types/key"
 	"tailscale.com/util/dnsname"
 )
+
+func TestIPPoolAllocation(t *testing.T) {
+	IntegrationSkip(t)
+
+	prefix := netip.MustParsePrefix("100.81.0.0/28")
+	developerPool := netip.MustParsePrefix("100.81.0.0/30")
+	serverPool := netip.MustParsePrefix("100.81.0.4/30")
+
+	for _, strategy := range []types.IPAllocationStrategy{
+		types.IPAllocationStrategySequential,
+		types.IPAllocationStrategyRandom,
+	} {
+		t.Run(string(strategy), func(t *testing.T) {
+			spec := ScenarioSpec{
+				NodesPerUser: 0,
+				Users:        []string{"developer", "server", "ordinary"},
+				Versions:     []string{"head"},
+			}
+
+			scenario, err := NewScenario(spec)
+			require.NoError(t, err)
+			defer scenario.ShutdownAssertNoPanics(t)
+
+			pol := &policyv2.Policy{
+				Groups: policyv2.Groups{
+					policyv2.Group("group:dev"): {policyv2.Username("developer@")},
+				},
+				TagOwners: policyv2.TagOwners{
+					policyv2.Tag("tag:server"): policyv2.Owners{usernameOwner("server@")},
+				},
+				NodeAttrs: []policyv2.NodeAttrGrant{
+					{
+						Targets: policyv2.Aliases{groupp("group:dev")},
+						IPPool:  []netip.Prefix{developerPool},
+					},
+					{
+						Targets: policyv2.Aliases{tagp("tag:server")},
+						IPPool:  []netip.Prefix{serverPool},
+					},
+				},
+			}
+
+			headscale, err := scenario.Headscale(
+				hsic.WithTestName("ip-pool-"+string(strategy)),
+				hsic.WithACLPolicy(pol),
+				hsic.WithConfigEnv(map[string]string{
+					"HEADSCALE_PREFIXES_V4": prefix.String(),
+				}),
+				hsic.WithIPAllocationStrategy(strategy),
+			)
+			requireNoErrGetHeadscale(t, err)
+
+			developer, err := scenario.CreateUser("developer")
+			require.NoError(t, err)
+			server, err := scenario.CreateUser("server")
+			require.NoError(t, err)
+			ordinary, err := scenario.CreateUser("ordinary")
+			require.NoError(t, err)
+
+			register := func(user *clientv1.User, tags ...string) TailscaleClient {
+				t.Helper()
+
+				client, err := scenario.CreateTailscaleNode(
+					"head",
+					tsic.WithNetwork(scenario.Networks()[0]),
+				)
+				require.NoError(t, err)
+				t.Cleanup(func() { _, _, _ = client.Shutdown() })
+
+				var key *clientv1.PreAuthKey
+				if len(tags) == 0 {
+					key, err = scenario.CreatePreAuthKey(mustParseID(user.Id), false, false)
+				} else {
+					key, err = scenario.CreatePreAuthKeyWithTags(mustParseID(user.Id), false, false, tags)
+				}
+				require.NoError(t, err)
+
+				err = client.Login(headscale.GetEndpoint(), key.Key)
+				require.NoError(t, err)
+				require.NoError(t, client.WaitForRunning(integrationutil.PeerSyncTimeout()))
+
+				return client
+			}
+
+			developerClient := register(developer)
+			serverClient := register(server, "tag:server")
+			ordinaryClient := register(ordinary)
+
+			developerIP, err := developerClient.IPv4()
+			require.NoError(t, err)
+			serverIP, err := serverClient.IPv4()
+			require.NoError(t, err)
+			ordinaryIP, err := ordinaryClient.IPv4()
+			require.NoError(t, err)
+
+			assert.True(
+				t,
+				developerPool.Contains(developerIP),
+				"developer IP %s should be in %s",
+				developerIP,
+				developerPool,
+			)
+			assert.True(
+				t,
+				serverPool.Contains(serverIP),
+				"tagged server IP %s should be in %s",
+				serverIP,
+				serverPool,
+			)
+			assert.True(
+				t,
+				prefix.Contains(ordinaryIP),
+				"ordinary IP %s should be in %s",
+				ordinaryIP,
+				prefix,
+			)
+			assert.False(
+				t,
+				developerPool.Contains(ordinaryIP),
+				"ordinary IP %s should not be in %s",
+				ordinaryIP,
+				developerPool,
+			)
+			assert.False(
+				t,
+				serverPool.Contains(ordinaryIP),
+				"ordinary IP %s should not be in %s",
+				ordinaryIP,
+				serverPool,
+			)
+			assert.NotEqual(t, developerIP, serverIP)
+			assert.NotEqual(t, developerIP, ordinaryIP)
+			assert.NotEqual(t, serverIP, ordinaryIP)
+		})
+	}
+}
 
 func TestPingAllByIP(t *testing.T) {
 	IntegrationSkip(t)
