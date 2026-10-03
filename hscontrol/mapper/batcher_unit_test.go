@@ -1211,3 +1211,12 @@ func BenchmarkConnectionEntryReady(b *testing.B) {
 		<-channel
 	}
 }
+
+func TestBatcherAddNodeAfterCloseDoesNotRegister(t *testing.T) {
+	b := NewBatcher(time.Second, 1, nil)
+	b.Close()
+	err := b.AddNode(1, make(chan *tailcfg.MapResponse, 1), 100, func() {})
+	require.ErrorIs(t, err, ErrBatcherShuttingDown)
+	require.Equal(t, 0, b.nodes.Size())
+	require.Zero(t, b.totalNodes.Load())
+}

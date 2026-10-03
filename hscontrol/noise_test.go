@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -647,4 +649,47 @@ func TestPollNetMapHandler_ForeignMachineKeyStillRejected(t *testing.T) {
 	}))
 
 	assert.Equal(t, http.StatusNotFound, rec.Code, "body=%q", rec.Body.String())
+}
+
+func TestNoiseShutdownClosesTransportsAndRejectsLateHandshake(t *testing.T) {
+	h := &Headscale{}
+
+	server, client := net.Pipe()
+	defer client.Close()
+
+	require.True(t, h.trackNoiseConnection(server))
+	h.closeNoiseConnections()
+
+	_, err := client.Write([]byte("map retry"))
+	require.Error(t, err, "retry must fail at transport, not reach the stopped batcher")
+
+	lateServer, lateClient := net.Pipe()
+	defer lateClient.Close()
+
+	require.False(t, h.trackNoiseConnection(lateServer))
+
+	_, err = lateClient.Write([]byte("late handshake"))
+	require.Error(t, err)
+	h.untrackNoiseConnection(server)
+	h.closeNoiseConnections()
+}
+
+func TestNoiseShutdownConcurrentHandshakes(t *testing.T) {
+	h := &Headscale{}
+
+	var wg sync.WaitGroup
+
+	for range 500 {
+		server, client := net.Pipe()
+
+		t.Cleanup(func() { _ = client.Close() })
+		wg.Go(func() { h.trackNoiseConnection(server) })
+	}
+
+	h.closeNoiseConnections()
+	wg.Wait()
+	h.noiseMu.Lock()
+	defer h.noiseMu.Unlock()
+
+	require.Empty(t, h.noiseConns, "no transport may register after shutdown")
 }

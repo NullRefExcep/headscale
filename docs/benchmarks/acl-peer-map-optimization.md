@@ -484,3 +484,59 @@ Go lint for the production/test diff passed; standalone collector Ruff F check
 and git whitespace check passed. Higher-priority next work is to reproduce and
 fix admission/shutdown ordering under a large reconnect fleet, then repeat
 comparable large before/after runs with isolated controller and generator hosts.
+
+
+## Noise transport shutdown fix, 2026-10-03
+
+The shutdown retry storm originates from the lifecycle of hijacked Noise HTTP/2
+transports. `NoiseUpgradeHandler` hands a hijacked connection to a separate
+`http2.Server.ServeConn`. The outer `http.Server.Shutdown` neither closes nor
+waits for hijacked connections, as documented by
+[Go Server.Shutdown](https://pkg.go.dev/net/http#Server.Shutdown). Once the
+batcher closed, existing Noise connections could still accept map requests;
+initial maps failed with ErrBatcherShuttingDown, became HTTP 500 responses and
+clients could retry using the same live connection. Ending just the map stream
+therefore did not end request admission.
+
+The fix tracks active Noise transports and atomically marks transport admission
+closed before stopping scheduled tasks and the batcher. It closes all tracked
+transports; handshakes completing after this point are closed rather than served.
+Normal disconnection unregisters the transport. A deferred close protects early
+Serve exits as well. The batcher additionally rejects AddNode after shutdown
+before allocating/registering a connection. Real failure logs remain enabled.
+
+Regression tests cover transport closure, a late handshake, repeated shutdown,
+500 concurrent registration attempts racing shutdown, and AddNode after Close.
+Ten race-test repeats passed on both Mac and Linux; existing Noise/TS2021 tests
+and the full mapper package also passed with -race. Go lint reported zero issues.
+
+For the earlier 302-client restart, the complete Docker log between the ready
+and all-streams-reconnected phases contained 82 initial-map errors, 82 batcher-
+add errors and 81 HTTP internal errors. These are precisely scoped counts,
+separate from the larger fleet's aggregate 78,637 initial-map failures.
+
+
+Post-fix real-client run `2026100318501562a0` passed with 100 IoT and 202
+personal clients (302 total), distributed 182/100/20 across Linux/local Mac/
+remote Mac, matching the earlier stage. Tailscale remained pinned at 1.102.5.
+Server image SHA256:
+`3d15b1e1b90065c5e800ab5f7f6ec0856375faa799b10067defa5bf49dc88d6c`.
+
+All Noise streams reconnected in 17.889 seconds (previously 17.041 seconds).
+Policy CLI took 1.352 seconds; TCP denial was observed after 4.802 seconds,
+including the existing probe timeout. All-client peer/metadata checks, allowed
+self/segment/admin traffic, denied foreign-user access and policy revocation
+passed. No reconnect speedup is established by this single pair.
+
+The complete server warn/error log through scenario completion is empty:
+initial-map failures 82 → 0, batcher-add errors 82 → 0 and HTTP internal errors
+81 → 0 compared with the earlier restart at this stage. No errors were hidden
+by changing log levels or removing failure logging. Larger post-fix ramps have
+not been run, so this validates the lifecycle fix at 302 real clients rather
+than certifying the full 1702-client or 12000–14000-node target.
+
+Runner exited zero with scenario_pass and cleaned phases. All run-labelled
+containers and dedicated bridges were verified absent on all three hosts; six
+neighbor sysctls were restored to 128/512/1024. Original Linux services remained
+running. Raw artifacts: `/private/tmp/headscale-shutdown-real`; complete log:
+`/root/workspace/acl-bench-tools/distributed-tls/2026100318501562a0/headscale-full.log`.

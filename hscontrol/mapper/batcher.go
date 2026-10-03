@@ -285,6 +285,12 @@ func (b *Batcher) AddNode(
 	version tailcfg.CapabilityVersion,
 	stop func(),
 ) error {
+	select {
+	case <-b.done:
+		return ErrBatcherShuttingDown
+	default:
+	}
+
 	addNodeStart := time.Now()
 	nlog := log.With().Uint64(zf.NodeID, id.Uint64()).Logger()
 
