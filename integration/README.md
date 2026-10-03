@@ -334,3 +334,79 @@ Tests save comprehensive artefacts to `control_logs/{runID}/`. Read them
 in this order: server stderr, client stderr, MapResponse JSON, database
 snapshot. The full debugging workflow, heuristics, and failure patterns
 are documented in [`../cmd/hi/README.md`](../cmd/hi/README.md).
+
+## Opt-in distributed ACL scale probe
+
+`tools/acl_scale_distributed.py` coordinates real kernel-TUN clients over SSH
+on multiple Docker hosts. It is separate from CI's container-local `hi`
+runner. It does not modify production Headscale code or an existing database.
+Read this procedure before invoking it.
+
+Prepare a normal optimized Headscale image on the Linux server. Supply a seed
+directory containing `config.json`, `ca.crt`, and `key.pem`; the script clones
+these into a fresh run directory, so every run has its own SQLite state.
+Configuration must use `/bench/db.sqlite`, `/bench/noise.key`, `/bench/derp.key`,
+`/bench/ca.crt`, `/bench/key.pem`, database policy mode, metrics at
+`0.0.0.0:9090`, TLS/listener at `0.0.0.0:18443`, server URL
+`https://10.59.0.16:18443`, and embedded DERP with STUN at `0.0.0.0:3478`.
+Use no external DERP maps. The certificate must have the server IP in its SAN.
+
+Build a client image for each native architecture from a pinned official
+Tailscale manifest, adding `busybox-extras` (HTTP server), `curl`, and the test
+CA under `/usr/local/share/ca-certificates/`, then run `update-ca-certificates`.
+The script overrides the entrypoint and starts a fresh real tailscaled and
+an HTTP fixture in each container. Install the CA only in test images; never
+change the host trust store. Never send the TLS private key to generator Macs.
+
+Example host specification (JSON):
+
+```json
+{
+  "server_dir": "/root/workspace/acl-bench-tools/distributed-tls",
+  "server_image": "headscale-acl-optimized:25c2a777",
+  "client_image": "headscale-scale-client:stable-20261003",
+  "url": "https://10.59.0.16:18443",
+  "hosts": [
+    {"name": "linux", "ssh": "root@10.59.0.16", "reserve_gib": 10, "client_cap": 2200},
+    {"name": "local", "reserve_gib": 1.5, "client_cap": 100},
+    {"name": "mac25", "ssh": "dimono@10.59.0.25", "docker": "/Applications/Docker.app/Contents/Resources/bin/docker", "reserve_gib": 1.5, "client_cap": 20}
+  ]
+}
+```
+
+The first host is the controller and requires root for temporary neighbor
+threshold tuning; every threshold is saved and restored during cleanup.
+SSH must use existing key authentication. Client caps include personal devices.
+The guard samples each Docker host's available RAM and stops enrollment if its
+reserve is crossed or swap grows more than 512 MiB above its initial value.
+Monitoring stops before artifact collection. Four labelled bridges per host
+avoid a single bridge's port limit. Existing containers are never cleaned.
+No Docker daemon TCP endpoint is exposed; commands use SSH multiplexing.
+
+Sync this checkout before every Linux-backed test, using an isolated destination:
+
+```sh
+make sync-server SYNC_DIR=/root/workspace/headscale-acl-25c2a777
+python3 tools/acl_scale_distributed.py --spec /private/tmp/headscale-distributed-spec.json \
+  --segments 10 --iot-stages 10,20 --output /private/tmp/headscale-distributed-smoke
+```
+
+After the smoke passes, sync again and ramp:
+
+```sh
+make sync-server SYNC_DIR=/root/workspace/headscale-acl-25c2a777
+python3 tools/acl_scale_distributed.py --spec /private/tmp/headscale-distributed-spec.json \
+  --segments 100 --iot-stages 100,500,1000,1300,1400,1500,1600,1700,1800,2000 \
+  --output /private/tmp/headscale-distributed-ramp
+```
+
+Stages must be increasing and divisible by the segment count (use 1,300 and
+1,400 rather than 1,250 when there are 100 segments). At each stage, verify all
+Noise streams, all peer counts and online/relay metadata, sampled TCP access,
+server restart/reconnect, and segment revocation. Phase records are fsynced;
+`complete` identifies a completed stage, while `scenario_pass` plus `cleaned`
+identifies a fully completed run. Resource stops are recorded separately.
+Results include host resources, server RSS/status, logs, and metrics. The fixture
+uses test auth keys rather than OIDC. Keep output private and sanitize credentials
+before publishing diagnostics. For larger fleets, provide larger independent
+Docker generators instead of reducing reserves on occupied hosts.

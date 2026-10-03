@@ -298,3 +298,189 @@ owned containers and empty networks. The test writes fsynced phase records to
 when the process is intentionally stopped. Full logs and host resource samples
 are retained under `/root/workspace/acl-bench-tools/` on the Linux host. Do not
 publish raw auth-key/debug logs without sanitizing ephemeral credentials.
+
+
+## Distributed stable-client follow-up (2026-10-03)
+
+The follow-up uses `tools/acl_scale_distributed.py` (procedure in
+`integration/README.md`) with Linux `10.59.0.16`, the local ARM Mac, and the
+Intel Mac `10.59.0.25`. Existing services remain running. The Mac Docker VMs
+have approximately 8 GiB RAM each; the occupied remote VM started with only
+2.44 GiB available. Generator caps are 100 local clients and 20 remote clients;
+Linux receives the remaining fleet. Reserve thresholds are 10 GiB on Linux
+and 1.5 GiB per Mac, with at most 512 MiB additional swap versus the baseline.
+
+Clients use official stable Tailscale 1.102.5, commit
+`5fb2a81b065b0a0bbbfc67ab20a0d9c6a1108115`, pinned multi-architecture manifest
+`sha256:c507f3a2a6ab1cabd8d809b98edeb41edbd5c3fb6ad9632ffd098b4c7d0b4065`.
+Native derived images add curl, an HTTP fixture, and only the test CA:
+
+| Host | Architecture | Derived image SHA256 |
+| --- | --- | --- |
+| Linux | amd64 | `4887343d0ee8b58417e1bf95c9c55aef5e27bf5f26522ecb78cf651e734c074d` |
+| Local Mac | arm64 | `cd317ee3297ab5f4efb5af977448c92d5af54ee21e1a2411efd1dd8de8b378d5` |
+| Remote Mac | amd64 | `92a989913f797f04d9b66a113ce6e7a8b2e231a7537c1f8213b3cf2116de7c48` |
+
+The controller remains production commit `25c2a777`, normal optimized build,
+limited to 8 CPUs and 8 GiB RAM. TLS is enabled on a test-only LAN-bound port,
+and the embedded DERP is isolated from external relays. Profiling, mapresponse
+capture, deadlock instrumentation and high-cardinality debug metrics from the
+`hi` harness are absent. Client traffic still uses real kernel TUN interfaces.
+This follows the [official Tailscale container guidance](https://tailscale.com/docs/features/containers/docker)
+and [Headscale embedded DERP guidance](https://headscale.net/stable/ref/derp/).
+
+The first smoke stopped after TCP revocation because the test incorrectly
+assigned reader segment indices: the administrator occupied index zero.
+No controller errors were logged. The fixture index was corrected, and the
+new smoke `20261003134746ad4b` passed both stages and cleanup:
+
+| IoT | Personal devices | Total clients | Placement Linux/local/remote | Reconnect | Policy command | TCP denial |
+| ---: | ---: | ---: | --- | ---: | ---: | ---: |
+| 10 | 22 | 32 | 0 / 16 / 16 | 2.003 s | 1.137 s | 5.316 s |
+| 20 | 22 | 42 | 1 / 21 / 20 | 3.283 s | 1.128 s | 5.316 s |
+
+Cross-host own-device, administrator-to-IoT and deny checks passed. All peer
+counts/online/relay metadata and all Noise streams were checked, including
+post-restart and post-revocation maps. The first stage separates the controller
+from every client generator; larger runs also generate clients on Linux.
+Thus the available hardware does not provide a dedicated server-only
+large-fleet capacity measurement.
+
+Policy timing here includes the SSH transport, file write and CLI invocation.
+It is not directly comparable to the previous container-local API timings.
+Reconnect starts before `docker restart --time 5`; curl denial includes the
+request timeout. Sampled HTTP traffic is not a sustained DERP throughput test.
+Both successful smoke stages are followed by `scenario_pass` and `cleaned`.
+Full smoke artifacts are in `/private/tmp/headscale-distributed-smoke-fixed`.
+
+
+## Distributed stable-client ramp, 2026-10-03
+
+Production code: `25c2a777550687bf37b5bf6993755b8b169455b8`.
+Tailscale 1.102.5, pinned manifest
+`sha256:c507f3a2a6ab1cabd8d809b98edeb41edbd5c3fb6ad9632ffd098b4c7d0b4065`.
+Linux Ryzen 9 9900X, 60.48 GiB RAM; local ARM and remote Intel Macs
+contributed 100 and 20 clients respectively. 100 segments, 101 personal
+owners, 202 personal clients; additional provisioning users do not own tagged IoT.
+Normal server build, no per-map debug dumps or CPU profiling.
+
+| IoT | Total clients | All streams reconnected (s) | Policy command (s) | TCP denial observed (s) |
+| ---: | ---: | ---: | ---: | ---: |
+| 100 | 302 | 17.04 | 1.77 | 6.25 |
+| 500 | 702 | 5.38 | 1.30 | 5.52 |
+| 1000 | 1202 | 13.58 | 1.36 | 11.88 |
+| 1300 | 1502 | 32.35 | 1.41 | 5.98 |
+| 1400 | 1602 | 15.54 | 1.43 | 6.07 |
+| 1500 | 1702 | 17.73 | 1.18 | 5.04 |
+
+Every completed stage checked all client peer counts and online/relay metadata,
+self-device connectivity, segment IoT access, denied foreign personal access,
+admin access, controller restart, policy revocation and restored unaffected access.
+Cross-Mac traffic used the embedded DERP; Linux peers established direct paths.
+A relay ping timed out during a deliberate controller restart.
+
+At 1802 enrolled clients, the generator guard stopped the run: Linux
+MemAvailable reached 9.43 GiB, below the 10 GiB reserve. This stage is not
+qualified. Linux swap increased only 4.25 MiB over the 640 MiB starting baseline.
+Maximum sampled controller CPU was 215.5% (about 2.16 cores); PID 1 VmHWM
+was 1184.06 MiB. These limits describe this shared generator/controller setup,
+not the maximum fleet size Headscale can support.
+
+Reconnect timings include Docker's five-second stop grace and observer queries.
+Policy command timings include SSH and CLI work; denial includes curl timeout
+and polling. They are not precise netmap delivery or revocation latency percentiles.
+No equivalent unoptimized real-client ramp was run: the previous indexed-versus-
+pairwise microbenchmarks demonstrate algorithmic gains, while this ramp
+demonstrates current functional capacity only.
+
+Full Docker log scan: 78,637 initial-map generation errors, 78,636 batcher-add
+errors, 78,635 HTTP internal errors, 354 send warnings, 354 change-application
+errors and 116 client-write errors. The dominant initial-map error was
+`batcher shutting down while generating map response`; errors clustered around
+intentional restarts and final stop. Successful recovery does not make this
+shutdown retry storm acceptable for production readiness.
+
+The scenario stopped as intended at its resource guard, but artifact collection
+then timed out transferring a 92,919,745-byte Docker log. Manual cleanup removed
+all 1802 clients, controller and 12 dedicated bridges across the three hosts;
+six temporary neighbor sysctls were restored to 128/512/1024. Original services
+were preserved. The collector now bounds artifact transfer so this specific
+timeout cannot bypass cleanup.
+
+Raw phases/resources: `/private/tmp/headscale-distributed-ramp`. Complete Docker
+log and scan summary: Linux
+`/root/workspace/acl-bench-tools/distributed-tls/20261003135117d36d/`.
+
+
+## Proposal implementation and paired measurements, 2026-10-03
+
+Implemented the ready-channel send fast path and snapshot-scoped requested-peer
+resolution in State and mapper patch filtering. Requested IDs are deduplicated
+through the existing adjacency order; self, absent and ACL-hidden nodes are
+omitted. A regression test verifies ordering, duplicates, hidden/unknown IDs,
+immediate visibility after snapshot replacement and retained old-view immutability.
+No Slopscale source was copied; this independently implements the ideas in the
+user's proposal.
+
+Selected peers still require an adjacency scan, preserving arbitrary adjacency
+order without adding a second per-node membership index. They resolve only
+requested views, avoiding the full peer-view allocation and hash lookup for each
+visible node. This is an allocation and constant-factor improvement, not an
+O(requested IDs) lookup algorithm.
+
+Paired benchmarks on the same Apple M1 Pro, Go 1.27, GOMAXPROCS=8, normal
+compiler settings, three repeats per version (medians):
+
+| Operation | Before | After | Speedup | Bytes/op before → after |
+| --- | ---: | ---: | ---: | ---: |
+| Ready connection send | 240.2 ns | 61.73 ns | 3.89× | 248 → 0 |
+| One named peer, 1200 nodes | 12.373 µs | 3.485 µs | 3.55× | 9736 → 8 |
+| One named peer, 12000 nodes | 150.457 µs | 34.181 µs | 4.40× | 98312 → 8 |
+| One named peer, 14000 nodes | 191.806 µs | 39.940 µs | 4.80× | 114696 → 8 |
+
+The send path drops from three allocations to zero; named peers from two to one.
+Raw results: `/private/tmp/headscale-proposals-before.log` and
+`/private/tmp/headscale-proposals-after.log`. Full mapper, state and change
+package tests passed with `-race` (42.25, 72.61 and 1.64 seconds respectively).
+These benchmark improvements must not be multiplied into a claimed fleet limit.
+
+Deferred: empty-response suppression and OriginKnows need explicit coverage of
+policy/DNS/DERP/removal and mixed batches; compact adjacency changes snapshot
+representation and should follow measured memory pressure; metric-handle caching
+needs a contention profile. None is necessary for the two demonstrated gains.
+The shutdown retry storm remains an unresolved operational finding, rather than
+a performance claim or silently suppressed error.
+
+
+Implementation commit: `18244872` on `feature/acl-peer-map-optimization`.
+Linux selected correctness tests and three-repeat benchmarks passed; ready send
+median 59.84 ns, named peers 12000/14000 nodes 20.001/23.365 µs, 8 bytes/op.
+There is no paired Linux baseline for these new operations, so speedup ratios
+above use only the paired Mac results. New-image SHA256:
+`fd3848351ca2a717de0f7648be7c29a30f03460a496e16556e41cda1e1d45b4f`.
+
+Repeated the exact previous three-host smoke scenario with the new image:
+
+| Clients | Reconnect before → after (s) | Policy command before → after (s) | TCP denial before → after (s) |
+| ---: | ---: | ---: | ---: |
+| 32 | 2.003 → 3.469 | 1.137 → 1.346 | 5.316 → 5.592 |
+| 42 | 3.283 → 3.618 | 1.128 → 1.239 | 5.316 → 5.408 |
+
+The new real-client scenario passed all checks and exited zero, including cleanup.
+The full server log is empty at warn/error level. All labelled containers and
+bridges were absent on all three hosts after cleanup; neighbor sysctls returned
+to their original values. Raw phases/resources/metrics:
+`/private/tmp/headscale-proposals-real`; Linux complete log:
+`/root/workspace/acl-bench-tools/distributed-tls/202610031455221f90/headscale-full.log`.
+
+These one-run wall-clock smoke results show no end-to-end speedup: they are
+slightly slower and dominated by container/SSH scheduling and curl timeouts.
+They establish compatibility of the new paths, not a new capacity limit or
+statistically significant reconnect regression. The 1702-client qualified ramp
+is from before this follow-up implementation; it has not been repeated at
+full size afterward.
+
+Go lint for the production/test diff passed; standalone collector Ruff F check
+and git whitespace check passed. Higher-priority next work is to reproduce and
+fix admission/shutdown ordering under a large reconnect fleet, then repeat
+comparable large before/after runs with isolated controller and generator hosts.
