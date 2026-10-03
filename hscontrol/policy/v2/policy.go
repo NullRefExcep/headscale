@@ -756,111 +756,17 @@ func (pm *PolicyManager) Filter() ([]tailcfg.FilterRule, []matcher.Match) {
 	return pm.filter, pm.matchers
 }
 
-// BuildPeerMap constructs peer relationship maps for the given nodes.
-// For global filters, it uses the global filter matchers for all nodes.
-// For autogroup:self policies (empty global filter), it builds per-node
-// peer maps using each node's specific filter rules.
-//
-// Compared to [policy.ReduceNodes], which builds the list per node, we end
-// up with doing the full work for every node O(n^2), while this will reduce
-// the list as we see relationships while building the map, making it
-// O(n^2/2) in the end, but with less work per node.
+// BuildPeerMap builds symmetric visibility from compiled ACL relationships.
+// Address membership is indexed once instead of testing every node pair against
+// every rule. Dense allow-all policies still require quadratic output space.
 func (pm *PolicyManager) BuildPeerMap(nodes views.Slice[types.NodeView]) map[types.NodeID][]types.NodeID {
 	if pm == nil {
 		return nil
 	}
-
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
-	// Precompute each node's subnet routes and exit-node status once; the
-	// O(n^2) pair scans below would otherwise recompute them for every pair.
-	type nodeRoutes struct {
-		subnet []netip.Prefix
-		isExit bool
-	}
-
-	routeInfo := make(map[types.NodeID]nodeRoutes, nodes.Len())
-	for _, n := range nodes.All() {
-		routeInfo[n.ID()] = nodeRoutes{subnet: n.SubnetRoutes(), isExit: n.IsExitNode()}
-	}
-
-	// If we have a global filter, use it for all nodes (normal case).
-	// Via grants require the per-node path because the global filter
-	// skips via grants (compileFilterRules: if len(grant.Via) > 0 { continue }).
-	if !pm.needsPerNodeFilter {
-		ret := make(map[types.NodeID][]types.NodeID, nodes.Len())
-
-		// Build the map of all peers according to the matchers.
-		for i := range nodes.Len() {
-			for j := i + 1; j < nodes.Len(); j++ {
-				if nodes.At(i).ID() == nodes.At(j).ID() {
-					continue
-				}
-
-				ri, rj := routeInfo[nodes.At(i).ID()], routeInfo[nodes.At(j).ID()]
-				if nodes.At(i).CanAccessWithRoutes(pm.matchers, nodes.At(j), ri.subnet, rj.subnet, rj.isExit) ||
-					nodes.At(j).CanAccessWithRoutes(pm.matchers, nodes.At(i), rj.subnet, ri.subnet, ri.isExit) {
-					ret[nodes.At(i).ID()] = append(ret[nodes.At(i).ID()], nodes.At(j).ID())
-					ret[nodes.At(j).ID()] = append(ret[nodes.At(j).ID()], nodes.At(i).ID())
-				}
-			}
-		}
-
-		return ret
-	}
-
-	// For autogroup:self or via grants, build per-node peer relationships
-	ret := make(map[types.NodeID][]types.NodeID, nodes.Len())
-
-	// Pre-compute per-node matchers using unreduced compiled rules
-	// We need unreduced rules to determine peer relationships correctly.
-	// Reduced rules only show destinations where the node is the target,
-	// but peer relationships require the full bidirectional access rules.
-	nodeMatchers := make(map[types.NodeID][]matcher.Match, nodes.Len())
-	for _, node := range nodes.All() {
-		unreduced := pm.filterRulesForNodeLocked(node)
-		nodeMatchers[node.ID()] = matcher.MatchesFromFilterRules(unreduced)
-	}
-
-	// Check each node pair for peer relationships.
-	// Start j at i+1 to avoid checking the same pair twice and creating duplicates.
-	// We use symmetric visibility: if EITHER node can access the other, BOTH see
-	// each other. This matches the global filter path behavior and ensures that
-	// one-way access rules (e.g., admin -> tagged server) still allow both nodes
-	// to see each other as peers, which is required for network connectivity.
-	for i := range nodes.Len() {
-		nodeI := nodes.At(i)
-		matchersI, hasFilterI := nodeMatchers[nodeI.ID()]
-		riI := routeInfo[nodeI.ID()]
-
-		for j := i + 1; j < nodes.Len(); j++ {
-			nodeJ := nodes.At(j)
-			matchersJ, hasFilterJ := nodeMatchers[nodeJ.ID()]
-			riJ := routeInfo[nodeJ.ID()]
-
-			// Check all access directions for symmetric peer visibility.
-			// For via grants, filter rules exist on the via-designated node
-			// (e.g., router-a) with sources being the client (group-a).
-			// We need to check BOTH:
-			//   1. nodeI.CanAccess(matchersI, nodeJ) — can nodeI reach nodeJ?
-			//   2. nodeJ.CanAccess(matchersI, nodeI) — can nodeJ reach nodeI
-			//      using nodeI's matchers? (reverse direction: the matchers
-			//      on the via node accept traffic FROM the source)
-			// Same for matchersJ in both directions.
-			canIAccessJ := hasFilterI && nodeI.CanAccessWithRoutes(matchersI, nodeJ, riI.subnet, riJ.subnet, riJ.isExit)
-			canJAccessI := hasFilterJ && nodeJ.CanAccessWithRoutes(matchersJ, nodeI, riJ.subnet, riI.subnet, riI.isExit)
-			canJReachI := hasFilterI && nodeJ.CanAccessWithRoutes(matchersI, nodeI, riJ.subnet, riI.subnet, riI.isExit)
-			canIReachJ := hasFilterJ && nodeI.CanAccessWithRoutes(matchersJ, nodeJ, riI.subnet, riJ.subnet, riJ.isExit)
-
-			if canIAccessJ || canJAccessI || canJReachI || canIReachJ {
-				ret[nodeI.ID()] = append(ret[nodeI.ID()], nodeJ.ID())
-				ret[nodeJ.ID()] = append(ret[nodeJ.ID()], nodeI.ID())
-			}
-		}
-	}
-
-	return ret
+	return pm.buildIndexedPeerMapLocked(nodes)
 }
 
 // filterRulesForNodeLocked returns the unreduced compiled filter rules
@@ -939,9 +845,8 @@ func (pm *PolicyManager) FilterForNode(node types.NodeView) ([]tailcfg.FilterRul
 // For global policies: returns the global matchers (same for all nodes)
 // For autogroup:self: returns node-specific matchers from unreduced compiled rules.
 //
-// Per-node results are cached and invalidated on policy/node updates
-// so [PolicyManager.BuildPeerMap]'s O(N²) slow path avoids recomputing
-// matchers for every pair.
+// Global IPSets are shared; per-node additions are cached and invalidated
+// on policy/node updates. Callers must not mutate returned matchers.
 func (pm *PolicyManager) MatchersForNode(node types.NodeView) ([]matcher.Match, error) {
 	if pm == nil {
 		return nil, nil
@@ -961,10 +866,27 @@ func (pm *PolicyManager) MatchersForNode(node types.NodeView) ([]matcher.Match, 
 		return cached, nil
 	}
 
-	// For autogroup:self or via grants, derive matchers from
-	// the stored compiled grants for this specific node.
-	unreduced := pm.filterRulesForNodeLocked(node)
-	matchers := matcher.MatchesFromFilterRules(unreduced)
+	// Global matchers contain immutable IPSets shared by every node. Rebuilding
+	// them inside each per-node cache multiplies parsing and memory by the fleet
+	// size. Only self/via additions need to be compiled for this node.
+	var extra []tailcfg.FilterRule
+
+	for i := range pm.compiledGrants {
+		cg := &pm.compiledGrants[i]
+		switch cg.category {
+		case grantCategoryRegular:
+		case grantCategorySelf:
+			extra = append(extra, compileAutogroupSelf(cg, node, pm.userNodeIdx)...)
+		case grantCategoryVia:
+			extra = append(extra, compileViaForNode(cg, node)...)
+		}
+	}
+
+	if len(extra) == 0 {
+		return pm.matchers, nil
+	}
+
+	matchers := append(slices.Clone(pm.matchers), matcher.MatchesFromFilterRules(extra)...)
 
 	if pm.cacheableLocked(node) {
 		pm.matchersForNodeMap.Store(node.ID(), matchers)
@@ -1432,6 +1354,12 @@ func (pm *PolicyManager) ViaRoutesForPeer(viewer, peer types.NodeView) types.Via
 	// pm.pol is written by SetPolicy under pm.mu; reading it before the
 	// lock races with concurrent policy reloads.
 	if pm.pol == nil {
+		return result
+	}
+
+	// Without via grants there can be no steering result. Avoid resolving every
+	// regular ACL for every peer in ordinary (including self) netmaps.
+	if len(pm.viaTargetTags) == 0 {
 		return result
 	}
 

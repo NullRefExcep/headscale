@@ -20,6 +20,7 @@ func ReduceFilterRules(node types.NodeView, rules []tailcfg.FilterRule) []tailcf
 	ret := []tailcfg.FilterRule{}
 	subnetRoutes := node.SubnetRoutes()
 	exitRoutes := node.ExitRoutes()
+	nodeIPs := node.IPs()
 
 	for _, rule := range rules {
 		// Handle CapGrant rules separately — they use CapGrant[].Dsts
@@ -37,6 +38,28 @@ func ReduceFilterRules(node types.NodeView, rules []tailcfg.FilterRule) []tailcf
 		var dests []tailcfg.NetPortRange
 
 		for _, dest := range rule.DstPorts {
+			// Compiled destinations are normally single IPs or canonical CIDRs.
+			// Test them directly instead of allocating/normalizing an IPSet for
+			// every destination in every node's packet filter. Non-canonical
+			// CIDRs must still fail closed; ranges and wildcards use the parser.
+			prefix, err := netip.ParsePrefix(dest.IP)
+			if err != nil {
+				ip, parseErr := netip.ParseAddr(dest.IP)
+				if parseErr == nil {
+					prefix = netip.PrefixFrom(ip, ip.BitLen())
+				}
+			}
+
+			if prefix.IsValid() && prefix == prefix.Masked() {
+				if slices.ContainsFunc(nodeIPs, prefix.Contains) ||
+					slices.ContainsFunc(subnetRoutes, prefix.Overlaps) ||
+					slices.ContainsFunc(exitRoutes, prefix.Overlaps) {
+					dests = append(dests, dest)
+				}
+
+				continue
+			}
+
 			expanded, err := util.ParseIPSet(dest.IP, nil)
 			// Fail closed: unparseable dests are dropped.
 			if err != nil {
