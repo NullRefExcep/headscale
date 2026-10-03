@@ -433,7 +433,18 @@ func (m *mapper) filterVisiblePeerPatches(
 
 	// Key by tailcfg.NodeID so patches are looked up by patch.NodeID
 	// directly, avoiding an unchecked int64->uint64 conversion.
-	peers := m.state.ListPeers(nodeID)
+	requested := make([]types.NodeID, 0, len(patches))
+	for _, patch := range patches {
+		if patch.NodeID > 0 {
+			requested = append(requested, types.NodeID(patch.NodeID))
+		}
+	}
+
+	if len(requested) == 0 {
+		return nil
+	}
+
+	peers := m.state.ListPeers(nodeID, requested...)
 
 	visible := make(map[tailcfg.NodeID]struct{}, peers.Len())
 	for _, peer := range peers.All() {

@@ -1194,3 +1194,20 @@ func TestRemoveConnectionAtIndex_NilsTrailingSlot(t *testing.T) {
 
 	mc.mutex.Unlock()
 }
+
+func BenchmarkConnectionEntryReady(b *testing.B) {
+	channel := make(chan *tailcfg.MapResponse, 1)
+	entry := &connectionEntry{id: "bench", c: channel}
+	response := &tailcfg.MapResponse{}
+
+	b.ReportAllocs()
+
+	for b.Loop() {
+		err := entry.send(response)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		<-channel
+	}
+}

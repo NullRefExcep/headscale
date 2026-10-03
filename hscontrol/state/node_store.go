@@ -973,6 +973,30 @@ func (s *NodeStore) ListPeers(id types.NodeID) views.Slice[types.NodeView] {
 	return views.SliceOf(peers)
 }
 
+// ListPeersAmong resolves only requested peers from one immutable snapshot.
+// Adjacency order and uniqueness are preserved; self and invisible IDs are omitted.
+func (s *NodeStore) ListPeersAmong(id types.NodeID, requested []types.NodeID) views.Slice[types.NodeView] {
+	snapshot := s.data.Load()
+
+	wanted := make(map[types.NodeID]struct{}, len(requested))
+	for _, peerID := range requested {
+		wanted[peerID] = struct{}{}
+	}
+
+	peers := make([]types.NodeView, 0, min(len(requested), len(snapshot.peersByNode[id])))
+	for _, peerID := range snapshot.peersByNode[id] {
+		if _, ok := wanted[peerID]; !ok || peerID == id {
+			continue
+		}
+
+		if peer, ok := snapshot.nodeViewsByID[peerID]; ok {
+			peers = append(peers, peer)
+		}
+	}
+
+	return views.SliceOf(peers)
+}
+
 // ListPeerIDs returns the sorted IDs of id's peers as a copy the caller
 // may keep across later writes.
 func (s *NodeStore) ListPeerIDs(id types.NodeID) []types.NodeID {
