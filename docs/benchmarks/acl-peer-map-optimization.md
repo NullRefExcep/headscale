@@ -3,8 +3,9 @@
 This branch is based on `feature/manual-node-ip` at
 `bb625b17f017502b8bba0ca8d856e12c5a41dd55`. It contains general Headscale
 optimizations, with no dependency on an application, identity provider,
-application database, or custom device schema. Measurements were taken on
+application database, or custom device schema. Initial measurements were taken on
 2026-10-03 on an Apple M1 Pro (8 logical CPUs, 16 GiB RAM), with Go 1.27.0.
+Subsequent Linux measurements and real-client runs are recorded below.
 
 ## Changes
 
@@ -139,3 +140,161 @@ Before rollout, finish bounded mass admission/reconnect and packet-level revoke
 checks of the final patch on a dedicated Linux host with real Noise sessions,
 then repeat the 1,000 / 5,000 / 10,000 / target-node matrix. No server rollout was
 performed by this experiment.
+
+
+## Linux measurements and real clients (2026-10-03)
+
+The Linux host `10.59.0.16` has an AMD Ryzen 9 9900X (24 logical CPUs),
+60.48 GiB RAM, and 8 GiB swap. Tests used an isolated checkout of production
+commit `25c2a777550687bf37b5bf6993755b8b169455b8`, leaving the host's original
+checkout and existing service containers alone.
+
+The final indexed implementation's Linux microbenchmark (Go 1.27.0,
+GOMAXPROCS=8) measured:
+
+| IoT endpoints | Users | Total nodes | Indexed build | Allocated MiB/build |
+| ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 100 | 1,200 | 0.787 ms | 1.12 |
+| 10,000 | 1,000 | 12,000 | 16.962 ms | 35.55 |
+| 10,000 | 2,000 | 14,000 | 28.990 ms | 54.59 |
+| 20,000 | 2,000 | 24,000 | 59.243 ms | 124.01 |
+
+The frozen pairwise comparison at 1,200 nodes took 2.731 s and allocated
+approximately 1,497 MiB. These are ACL construction measurements; they do not
+establish control-plane capacity for 14,000 real clients. The real-client
+self-grant and compact-CIDR equivalence checks also passed on Linux.
+
+### Real-client scenario
+
+`TestACLRealClientScale` is opt-in and runs a real kernel-TUN `tailscaled` in
+one container per endpoint. Readers and an administrator each own two personal
+devices. Tagged IoT devices belong to independent segments. Policies permit
+own-device access, segment TCP 80/443 access, and administrator access to the
+IoT prefix. Enrollment uses reusable test auth keys, rather than OIDC.
+
+At each completed stage the test verifies all Noise map streams and all clients'
+peer counts/online metadata, samples allowed and denied TCP traffic, restarts
+Headscale, waits for every stream to reconnect, revokes one segment's access,
+and verifies TCP denial while administrator and own-device access survive.
+Packet probes sample representative nodes; this is not sustained throughput,
+a DERP bandwidth benchmark, or a test of every node pair. The test is sequential
+segment enrollment followed by a simultaneous server outage/reconnect, rather
+than simultaneous first registration of all clients.
+
+The client image is `ts-42c1b1-head-b48553:latest`, image SHA
+`c659bcd7a8eb628e03dca936ab85e5d127dd2cf9195812bac751191f081ee12e`,
+Tailscale `1.103.0-dev20260929`, commit
+`a0e471a35b8f38ee6abcfded937d3979ede68234`. This is one development version,
+not a stable-client compatibility matrix.
+
+The optimized server image `headscale-acl-optimized:25c2a777` uses a normal
+`CGO_ENABLED=0 go build`, without the integration Dockerfile's `-N -l` flags.
+Image SHA: `93abcefa7bf1e5e6af5279e303590a740d826dafc8c6c8da251bcdafc34ba324`.
+Server log level is `warn`. The integration harness still enables profiling
+and Docker statistics collection, so these are instrumented runs. Embedded DERP
+is enabled. Four independent Docker bridges split the generators; sampled
+administrator TCP traffic crosses bridges.
+
+### Completed stages and resource limit
+
+| Run ID | IoT | Personal devices | Total real clients | Build | All streams reconnected | ACL applied | TCP denial observed |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: |
+| `20261003-140529-6f3584` | 500 | 102 | 602 | debug, trace | 41.076 s | 0.027 s | 4.058 s |
+| `20261003-145210-babb29` | 100 | 22 | 122 | optimized, warn | 34.729 s | 0.022 s | 4.043 s |
+| `20261003-145812-c77f95` completed stage | 500 | 202 | 702 | optimized, warn | 41.476 s | 0.038 s | 4.060 s |
+| `20261003-153359-84a7f0` intermediate stage | 480 | 162 | 642 | optimized, warn | 41.127 s | 0.026 s | 4.056 s |
+| `20261003-153359-84a7f0` final stage | 800 | 162 | 962 | optimized, warn | 41.264 s | 0.041 s | 4.072 s |
+
+Reconnect times start before Docker's server restart and include its roughly
+30-second stop grace period. At 702 clients Headscale was ready at 32.422 s,
+all streams were back at 41.476 s, and all peer checks finished at 47.033 s.
+TCP denial includes the failed curl request's timeout (about four seconds),
+so it is an observation bound, not a precise four-second ACL propagation time.
+
+Run `20261003-145812-c77f95` attempted 1,500 IoT plus 202 personal devices.
+It completed the 702-client stage, then the resource watchdog stopped the suite
+at approximately 1,040 real client containers when swap use reached 555.2 MiB.
+Available RAM was 15.13 GiB; the last completed enrollment batch had 835 IoT.
+The runner exited 143 after intentional stop. Later stages did not complete
+and must not be recorded as passing. The watchdog reserves 10 GiB available RAM,
+limits swap use to 512 MiB, and reserves 12 GiB disk space.
+
+Headscale's sampled peak CPU was 26.11% of one core in that ramp. Its peak
+cgroup memory charge was 8,274.1 MiB, including file cache and kernel memory;
+this is not the Go heap. A diagnostic sample around 880 clients showed 418.64
+MiB anonymous memory, 1,204.74 MiB file pages and 1,267.24 MiB slab. These are
+instantaneous measurements, not peak process RSS. Most generated clients used
+approximately 30–35 MiB each, before their host kernel/network overhead. The
+host runs both server and generators, so its resource boundary does not
+establish a Headscale-only node limit.
+
+The bounded final run `20261003-153359-84a7f0` reached 800 IoT and 162 personal
+devices, representing 80 reader identities plus one administrator (81 users).
+A further 80 provisioning identities own no nodes after tag assignment.
+All scenario phases completed at `2026-10-03T13:02:50Z`: server ready in
+32.225 s, all Noise streams reconnected in 41.264 s, all peer checks completed
+in 49.025 s, ACL applied in 41 ms, and sampled TCP denial observed in 4.072 s.
+The final phase record was fsynced after administrator and own-device access
+checks. These are completed scenario assertions, not a full runner PASS.
+
+During subsequent artifact collection/cleanup, the resource watchdog stopped
+the suite at `13:03:41Z`, with swap 642.5 MiB and available RAM 13.88 GiB.
+The runner exited 143 and removed 963 remaining containers. Its captured
+Headscale stderr had 742 lines and no panic/fatal/error matches. The final
+run's sampled server CPU peak was 43.15% of one core; cgroup memory peak
+7,755.4 MiB. Separately sampled anonymous memory peaked at 632.46 MiB.
+Cgroup charge includes cached files and kernel memory, and anonymous memory
+is not an isolated Go-heap measurement. The complete host monitor and durable
+phase ledger distinguish the passing final stage from the interrupted teardown.
+
+Thus 962 real clients completed the functional/reconnect/revoke scenario on
+this shared server; approximately 1,040 client containers were created during
+the larger ramp. Neither number establishes a maximum for Headscale itself.
+The 10,000-IoT/1,000–2,000-user target remains unverified with real clients.
+Next capacity work needs separate generators and a repeatable outage/revocation
+matrix, plus stable-client versions and admission bursts; ACL microbenchmark
+results alone cannot replace those checks.
+
+After both runs the owned containers and four-bridge networks were removed.
+All six neighbor thresholds were restored to their original values. Existing
+service containers were left running; logs, the isolated checkout, and reusable
+test images remain for reproduction. No production deployment was performed.
+
+### Generator issues found and corrected
+
+An initial 500-IoT attempt stopped during enrollment with a client-command
+timeout. Kernel logs showed `arp_cache: neighbor table overflow`, while
+Headscale's full captured log had no panic/error or slow matching request.
+The host's original neighbor thresholds were 128/512/1024. Temporarily raising
+IPv4 and IPv6 `net.*.neigh.default.gc_thresh{1,2,3}` to 4096/16384/65536 allowed
+the 602-client retry to pass. Original values were saved and restored after the runs.
+
+A single bridge also cannot carry the planned fleet: Linux 6.8 has 1,024 bridge
+ports. A subsequent single-bridge ramp was stopped before that limit and replaced
+with four bridges. See the [Docker bridge connection-limit documentation](https://docs.docker.com/engine/network/drivers/bridge/#connection-limit-for-bridge-networks)
+and [Linux 6.8 bridge constants](https://raw.githubusercontent.com/torvalds/linux/v6.8/net/bridge/br_private.h).
+Neither interrupted attempt is a capacity pass or an ACL failure.
+
+The local Docker VM has about 8 GiB RAM. The remote Intel Mac at `10.59.0.25`
+also has an approximately 8 GiB Docker VM and existing workloads. Neither was
+used as a generator in this experiment. Distributed generators remain needed
+to validate 10,000 IoT plus 1,000–2,000 users without sharing the server's RAM.
+
+### Reproduce the real-client run
+
+After the repository-required `make sync-server` (using an isolated destination),
+set the prebuilt-image overrides and invoke the integration runner on Linux:
+
+```sh
+HEADSCALE_INTEGRATION_TAILSCALE_IMAGE=ts-42c1b1-head-b48553:latest \
+HEADSCALE_INTEGRATION_HEADSCALE_IMAGE=headscale-acl-optimized:25c2a777 \
+HEADSCALE_INTEGRATION_SCALE_IOT=800 \
+go run ./cmd/hi run TestACLRealClientScale --timeout=3600s --clean-before=false --stats
+```
+
+Use a resource monitor and an exclusive run ID; cleanup must target only the
+owned containers and empty networks. The test writes fsynced phase records to
+`control_logs/real-scale-*/scale-progress-*.jsonl`, preserving completed stages
+when the process is intentionally stopped. Full logs and host resource samples
+are retained under `/root/workspace/acl-bench-tools/` on the Linux host. Do not
+publish raw auth-key/debug logs without sanitizing ephemeral credentials.
