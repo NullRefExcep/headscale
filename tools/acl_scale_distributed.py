@@ -304,19 +304,37 @@ def main():
                     (output / filename).write_text(result.stdout + result.stderr)
                 except (subprocess.TimeoutExpired, RuntimeError) as error:
                     phase('artifact_failed', artifact=filename, error=str(error))
+            cleanup_errors = []
             for host in hosts:
                 names = host.run(['ps', '-a', '--filter', 'label=' + label, '--format', '{{.Names}}']).stdout.splitlines()
                 for offset in range(0, len(names), 30):
                     host.run(['rm', '-f', *names[offset:offset+30]], timeout=180, check=False)
+                # Docker can partially fail a bulk removal. Retry only this
+                # run's remaining containers before declaring cleanup complete.
+                remaining = host.run(['ps', '-aq', '--filter', 'label=' + label]).stdout.splitlines()
+                for identifier in remaining:
+                    try:
+                        host.run(['rm', '-f', identifier], timeout=60)
+                    except (subprocess.TimeoutExpired, RuntimeError) as error:
+                        cleanup_errors.append(str(error))
+                if host.run(['ps', '-aq', '--filter', 'label=' + label]).stdout.strip():
+                    cleanup_errors.append(host.name + ': run containers remain after cleanup')
             for host, network in networks:
-                host.run(['network', 'rm', network], check=False)
+                try:
+                    host.run(['network', 'rm', network])
+                except (subprocess.TimeoutExpired, RuntimeError) as error:
+                    cleanup_errors.append(str(error))
             for key, value in originals.items():
                 current = int(linux.command(['sysctl', '-n', key]).stdout)
                 expected = {1:4096, 2:16384, 3:65536}[int(key[-1])]
                 if current != expected: raise RuntimeError('sysctl changed concurrently: ' + key)
                 linux.command(['sysctl', '-w', key + '=' + str(value)])
-            phase('cleaned')
             for host in hosts: host.close()
+            if cleanup_errors:
+                phase('cleanup_failed', errors=cleanup_errors)
+                ledger.close()
+                raise RuntimeError('test resource cleanup incomplete')
+            phase('cleaned')
         ledger.close()
 
 
