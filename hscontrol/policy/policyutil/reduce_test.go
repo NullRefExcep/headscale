@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -1337,5 +1338,46 @@ func TestReduceFilterRulesCapGrant(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Compare the IP/CIDR fast path with the IPSet parser, including malformed
+// destinations, non-network bits, mapped addresses, routes, and exit prefixes.
+func TestReduceFilterRulesDirectPrefixMatchesIPSet(t *testing.T) {
+	destinations := []string{
+		"100.64.0.1", "100.64.0.2", "100.64.0.0/24", "100.64.0.1/24",
+		"100.64.0.0-100.64.0.10", "*", "0.0.0.0/0", "::/0",
+		"fd7a:115c:a1e0::1", "fd7a:115c:a1e0::/48", "fd7a:115c:a1e0::1/48",
+		"::ffff:100.64.0.1", "::ffff:100.64.0.0/120", "fe80::1%eth0",
+		"10.0.0.0/8", "10.1.0.0/16", "fd00::/8", "invalid", "100.64.0.1/33",
+	}
+
+	for _, routes := range [][]netip.Prefix{nil, {p("10.1.0.0/16")}, {p("fd00::/8")}, {p("0.0.0.0/0")}, {p("::/0")}} {
+		node := (&types.Node{
+			IPv4: ap("100.64.0.1"), IPv6: ap("fd7a:115c:a1e0::1"),
+			ApprovedRoutes: routes, Hostinfo: &tailcfg.Hostinfo{RoutableIPs: routes},
+		}).View()
+		rule := tailcfg.FilterRule{SrcIPs: []string{"*"}, IPProto: []int{6}}
+
+		var expectedDests []tailcfg.NetPortRange
+
+		for _, dest := range destinations {
+			dp := tailcfg.NetPortRange{IP: dest, Ports: tailcfg.PortRange{First: 80, Last: 443}}
+			rule.DstPorts = append(rule.DstPorts, dp)
+
+			set, err := util.ParseIPSet(dest, nil)
+			if err != nil {
+				continue
+			}
+
+			if node.InIPSet(set) || slices.ContainsFunc(node.SubnetRoutes(), set.OverlapsPrefix) ||
+				slices.ContainsFunc(node.ExitRoutes(), set.OverlapsPrefix) {
+				expectedDests = append(expectedDests, dp)
+			}
+		}
+
+		expected := rule
+		expected.DstPorts = expectedDests
+		require.Equal(t, []tailcfg.FilterRule{expected}, policyutil.ReduceFilterRules(node, []tailcfg.FilterRule{rule}))
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -2438,4 +2439,45 @@ func TestPolicyCachesSurviveOldViewDuringBuild(t *testing.T) {
 			assert.Equal(t, tt.want, got, "cached artefact must reflect the written node")
 		})
 	}
+}
+
+func BenchmarkNamedPeers(b *testing.B) {
+	for _, count := range []types.NodeID{1200, 12000, 14000} {
+		b.Run(strconv.FormatUint(uint64(count), 10), func(b *testing.B) {
+			store := &NodeStore{}
+			snapshot := &Snapshot{nodeViewsByID: make(map[types.NodeID]types.NodeView), peersByNode: map[types.NodeID][]types.NodeID{1: {}}}
+
+			for i := types.NodeID(2); i <= count; i++ {
+				id := i
+				node := &types.Node{ID: id}
+				snapshot.nodeViewsByID[id] = node.View()
+				snapshot.peersByNode[1] = append(snapshot.peersByNode[1], id)
+			}
+
+			store.data.Store(snapshot)
+			state := &State{nodeStore: store}
+
+			b.ReportAllocs()
+
+			for b.Loop() {
+				_ = state.ListPeers(1, count)
+			}
+		})
+	}
+}
+
+func TestListPeersAmongSnapshotVisibility(t *testing.T) {
+	store := &NodeStore{}
+	a, b, hidden := &types.Node{ID: 2}, &types.Node{ID: 3}, &types.Node{ID: 4}
+	snapshot := &Snapshot{nodeViewsByID: map[types.NodeID]types.NodeView{2: a.View(), 3: b.View(), 4: hidden.View()}, peersByNode: map[types.NodeID][]types.NodeID{1: {3, 2}}}
+	store.data.Store(snapshot)
+	peers := store.ListPeersAmong(1, []types.NodeID{1, 2, 2, 3, 4, 999})
+	require.Equal(t, 2, peers.Len())
+	require.Equal(t, types.NodeID(3), peers.At(0).ID())
+	require.Equal(t, types.NodeID(2), peers.At(1).ID())
+
+	replacement := &Snapshot{nodeViewsByID: snapshot.nodeViewsByID, peersByNode: map[types.NodeID][]types.NodeID{1: {3}}}
+	store.data.Store(replacement)
+	require.Zero(t, store.ListPeersAmong(1, []types.NodeID{2, 4}).Len())
+	require.Equal(t, 2, peers.Len(), "previous views remain immutable")
 }

@@ -122,3 +122,15 @@ func (m *Match) DestsIsTheInternet() bool {
 	// where the internet prefixes are combined with other dests.
 	return util.IPSetSubsetOf(util.TheInternet(), m.dests)
 }
+
+// SourceRanges returns the normalized source address ranges used by the matcher.
+// The returned slice must not be modified.
+func (m *Match) SourceRanges() []netipx.IPRange {
+	return m.srcs.Ranges()
+}
+
+// DestinationRanges returns normalized destination address ranges, including
+// capability grants. The returned slice must not be modified.
+func (m *Match) DestinationRanges() []netipx.IPRange {
+	return m.dests.Ranges()
+}

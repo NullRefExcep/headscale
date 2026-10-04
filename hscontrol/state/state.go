@@ -886,26 +886,7 @@ func (s *State) ListPeers(nodeID types.NodeID, peerIDs ...types.NodeID) views.Sl
 		return s.nodeStore.ListPeers(nodeID)
 	}
 
-	// Incremental updates (NodeAdded, NodeChanged) name the peers involved.
-	// Resolve them through the recipient's adjacency so a changed node the
-	// policy hides from this recipient is never delivered; the mapper still
-	// applies the live matchers on top.
-	nodeIDSet := make(map[types.NodeID]struct{}, len(peerIDs))
-	for _, id := range peerIDs {
-		nodeIDSet[id] = struct{}{}
-	}
-
-	var filteredNodes []types.NodeView
-
-	// Adjacency is built from node pairs, so it never contains the
-	// recipient: a change batch naming it cannot return it as its own peer.
-	for _, peer := range s.nodeStore.ListPeers(nodeID).All() {
-		if _, exists := nodeIDSet[peer.ID()]; exists {
-			filteredNodes = append(filteredNodes, peer)
-		}
-	}
-
-	return views.SliceOf(filteredNodes)
+	return s.nodeStore.ListPeersAmong(nodeID, peerIDs)
 }
 
 // ListEphemeralNodes retrieves all ephemeral (temporary) nodes in the system.

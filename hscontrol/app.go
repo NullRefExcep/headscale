@@ -103,6 +103,11 @@ type Headscale struct {
 	authProvider   AuthProvider
 	mapBatcher     *mapper.Batcher
 
+	// Hijacked Noise transports are not closed by http.Server.Shutdown.
+	noiseMu      sync.Mutex
+	noiseConns   map[net.Conn]struct{}
+	noiseClosing bool
+
 	clientStreamsOpen sync.WaitGroup
 }
 
@@ -557,6 +562,7 @@ func (h *Headscale) Serve() error {
 
 	h.mapBatcher.Start()
 	defer h.mapBatcher.Close()
+	defer h.closeNoiseConnections()
 
 	if h.cfg.DERP.ServerEnabled {
 		// When embedded DERP is enabled we always need a STUN server
@@ -874,6 +880,9 @@ func (h *Headscale) Serve() error {
 				log.Info().
 					Str("signal", sig.String()).
 					Msg("Received signal to stop, shutting down gracefully")
+
+				// Close hijacked transports before the batcher can stop accepting maps.
+				h.closeNoiseConnections()
 
 				scheduleCancel()
 				h.ephemeralGC.Close()

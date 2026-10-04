@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -125,6 +126,11 @@ func (h *Headscale) NoiseUpgradeHandler(
 		return
 	}
 
+	if !h.trackNoiseConnection(noiseConn) {
+		return
+	}
+	defer h.untrackNoiseConnection(noiseConn)
+
 	ns.conn = noiseConn
 	ns.machineKey = ns.conn.Peer()
 	ns.protocolVersion = ns.conn.ProtocolVersion()
@@ -219,6 +225,51 @@ func (h *Headscale) NoiseUpgradeHandler(
 			BaseConfig: ns.httpBaseConfig,
 		},
 	)
+}
+
+// trackNoiseConnection also rejects handshakes completing during shutdown.
+// A single lock makes registering a transport atomic with closing admission.
+func (h *Headscale) trackNoiseConnection(conn net.Conn) bool {
+	h.noiseMu.Lock()
+	if h.noiseClosing {
+		h.noiseMu.Unlock()
+
+		_ = conn.Close()
+
+		return false
+	}
+
+	if h.noiseConns == nil {
+		h.noiseConns = make(map[net.Conn]struct{})
+	}
+
+	h.noiseConns[conn] = struct{}{}
+	h.noiseMu.Unlock()
+
+	return true
+}
+
+func (h *Headscale) untrackNoiseConnection(conn net.Conn) {
+	h.noiseMu.Lock()
+	delete(h.noiseConns, conn)
+	h.noiseMu.Unlock()
+
+	_ = conn.Close()
+}
+
+// closeNoiseConnections closes transports rather than just ending map streams:
+// otherwise clients can retry maps on their still-open HTTP/2 sessions after
+// the batcher has stopped. Closing admission also catches in-flight handshakes.
+func (h *Headscale) closeNoiseConnections() {
+	h.noiseMu.Lock()
+	h.noiseClosing = true
+	conns := h.noiseConns
+	h.noiseConns = nil
+	h.noiseMu.Unlock()
+
+	for conn := range conns {
+		_ = conn.Close()
+	}
 }
 
 func unsupportedClientError(version tailcfg.CapabilityVersion) error {
