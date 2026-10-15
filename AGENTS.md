@@ -66,7 +66,7 @@ similar lines of code is better than a premature abstraction.
 ## Quick Start
 
 ```bash
-# Enter the nix dev shell (Go 1.27.0, buf, golangci-lint, prek)
+# Enter the nix dev shell (Go 1.27.2, buf, golangci-lint, prek)
 nix develop
 
 # Full development workflow: fmt + lint + test + build
@@ -93,7 +93,7 @@ go run ./tools/bump plan     # what is stale, changes nothing
 go run ./tools/bump verify   # do the pins still agree
 ```
 
-Go 1.27.0 minimum (per `go.mod:3`). `nix develop` pins the exact toolchain
+Go 1.27.2 minimum (per `go.mod:3`). `nix develop` pins the exact toolchain
 used in CI.
 
 ## Pre-Commit with prek
@@ -331,3 +331,9 @@ a broken one.
 - **Do not edit `gen/`** — it is regenerated from `proto/` by
   `make generate`.
 - **Proto changes + code changes should be two commits**, not one.
+- **The NixOS test kit is a public contract** consumed by other projects'
+  NixOS tests: the "Contract" in `nix/README.md`, covering
+  `nix/testkit.nix`, `nix/testkit-peer.nix`, the embedded DERP region
+  and `HEADSCALE_DEBUG_INSECURE_TLS_LISTEN_ADDR`, and the CLI commands
+  `hs-authkey` calls. Breaking it needs a "NixOS test kit" BREAKING entry
+  in `CHANGELOG.md`.
