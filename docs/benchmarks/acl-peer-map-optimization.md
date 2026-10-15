@@ -540,3 +540,110 @@ containers and dedicated bridges were verified absent on all three hosts; six
 neighbor sysctls were restored to 128/512/1024. Original Linux services remained
 running. Raw artifacts: `/private/tmp/headscale-shutdown-real`; complete log:
 `/root/workspace/acl-bench-tools/distributed-tls/2026100318501562a0/headscale-full.log`.
+
+
+## Paired distributed comparison, 2026-10-04
+
+Repeated the same real-client ramp sequentially on the three existing hosts,
+using the unchanged collector during both runs. Baseline is `25c2a777`, already
+including the indexed ACL optimization; candidate is `904791bb`, adding the
+ready-send / named-peer improvements and Noise shutdown fix. This comparison
+isolates those follow-up changes, not indexed ACL versus the original pairwise
+algorithm. Normal optimized image IDs remained respectively
+`93abcefa7bf1e5e6af5279e303590a740d826dafc8c6c8da251bcdafc34ba324` and
+`3d15b1e1b90065c5e800ab5f7f6ec0856375faa799b10067defa5bf49dc88d6c`.
+
+Both use Tailscale 1.102.5, 100 segments, 101 personal owners with two devices
+each, and tagged IoT provisioned by 100 separate users. Controller quota stays
+8 CPUs / 8 GiB. Personal-device placement is 82 Linux / 100 local Mac / 20
+remote Mac; additional IoT run on Linux. Stages are 100/500/1000/1500 IoT,
+with a 10 GiB Linux RAM reserve and 1.5 GiB on each Mac. Fresh SQLite state,
+identical TLS seed, policy, client images and restart/observation procedure are
+used for both runs. Initial Linux MemAvailable was 55.892/55.941 GiB.
+
+| Total clients | Reconnect before → after (s) | Policy CLI before → after (s) | TCP denial observation before → after (s) |
+| ---: | ---: | ---: | ---: |
+| 302 | 7.529 → 4.256 | 1.609 → 1.615 | 6.162 → 3.355 |
+| 702 | 11.238 → 5.986 | 1.618 → 1.666 | 6.289 → 3.369 |
+| 1202 | 7.642 → 13.651 | 1.281 → 1.458 | 4.872 → 4.766 |
+
+All three common stages passed all-stream connection checks, every client's
+peer-count and online/relay metadata checks, sampled allowed self/segment/admin
+TCP traffic, denied foreign-user traffic, restart/reconnect and segment access
+revocation. This includes preserving own-device and admin access after revoking
+segment access. Timing is one observation per stage, not p95 or repeated-trial
+statistics; reconnect includes container shutdown/start and polling, CLI timing
+includes SSH/exec, and denial timing includes curl timeout and polling.
+Reconnect improved at two stages but worsened at 1202. No consistent end-to-end
+speedup or statistically established regression is demonstrated. The earlier
+paired operation microbenchmarks remain the evidence for cheaper hot paths.
+
+| Total clients | RSS samples before / after | Median RSS before → after (MiB) | Maximum sampled RSS before → after (MiB) |
+| ---: | ---: | ---: | ---: |
+| 302 | 5 / 4 | 185.17 → 170.06 | 247.36 → 222.55 |
+| 702 | 9 / 8 | 357.54 → 348.33 | 422.73 → 444.32 |
+| 1202 | 14 / 15 | 537.85 → 545.30 | 574.47 → 559.16 |
+
+Rows use PID 1 VmRSS from samples with exactly that client count, including
+restart and revocation phases. There is no meaningful fleet memory improvement
+at the largest common stage. Whole-ramp sampled CPU peak was 225.87% → 210.30%
+(about 2.26 → 2.10 cores), sampled RSS peak 808.48 → 796.91 MiB and VmHWM
+841.96 → 809.05 MiB. Sampling misses short CPU peaks; these small differences
+are not a capacity claim.
+
+Full controller logs were collected on Linux before removing the controllers,
+covering setup/enrollment and the three restarts through the resource stop.
+These counts exclude final forced container cleanup.
+
+| Message | Before | After |
+| --- | ---: | ---: |
+| initial map generation failed | 599 | 0 |
+| failed to add node to batcher | 580 | 0 |
+| http internal server error | 566 | 0 |
+| send: connection failed (warning) | 72 | 40 |
+| failed to apply change | 72 | 40 |
+| cannot write update to client | 57 | 37 |
+| JSON error-level total | 1874 | 77 |
+| Unstructured TLS handshake EOF | 55 | 8 |
+
+The shutdown retry/admission failure is eliminated in this paired run. Error-
+level entries fall about 95.9%, but the log is not clean. Remaining errors
+contain `i/o timeout` and `timeout sending to channel (likely stale connection)`.
+All candidate channel-send failures identify node IDs 2 or 7; a read-only DB
+query identifies these as the two `scale-admin` devices, which see every IoT
+and run on the Mac generators. Broad-visibility-client delivery/backpressure
+is therefore the next profiling target, not a proven diagnosis of its cause.
+No logging threshold was changed.
+
+Both ramps enrolled all 1702 clients but crossed the Linux RAM reserve before
+finishing that stage's map checks. Baseline stopped with 9.698 GiB available
+and candidate with 9.903 GiB. Baseline swap grew 648.25 → 834.25 MiB; candidate
+834.25 → 833.25 MiB. The RAM threshold, not the 512 MiB swap-growth threshold,
+stopped both. Neither run has scenario_pass; both exit 1 with a recorded
+resource-guard stop. Today the largest fully qualified common stage is 1202
+clients (1000 IoT + 202 personal devices), not 1702. The prior 1702-qualified
+run remains historical evidence, not a repeated current result. These numbers
+constrain this shared controller/generator fixture, not standalone Headscale
+or the 10000-IoT / 1000–2000-user target.
+
+Raw artifacts are private:
+
+- Before: `/private/tmp/headscale-comparison-before-20261004`, run `20261004110539d936`.
+- After: `/private/tmp/headscale-comparison-after-20261004`, run `202610041131431140`.
+- Paired derived summary: `/private/tmp/headscale-comparison-summary-20261004.json`.
+- Linux full logs and log summaries: `/root/workspace/acl-bench-tools/distributed-tls/<run>/headscale-full.log` and `log-summary.json`.
+
+Both runs recorded cleaned and restored all six neighbor sysctls to
+128/512/1024. Independent checks found no own containers/networks on Linux or
+the remote Mac. Candidate bulk Docker removal left 24 stopped local containers
+despite reporting cleaned; these were removed individually and verified absent.
+The collector now checks remaining run-labelled containers and retries their
+removal individually, and fails on network-removal errors rather than silently
+reporting cleanup success. This collector-only change was made after both ramps
+and cannot affect their measurements. Original Linux services remain running.
+
+Next: profile full-map delivery and stale admin connections with separate
+controller and generator hosts; then repeat large paired runs with multiple
+restart observations per fleet size. Do not infer 12000–14000 real-client
+capacity from these measurements or multiply microbenchmark speedups into a
+fleet limit.
