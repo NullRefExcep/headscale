@@ -622,7 +622,7 @@ func (s *State) DeleteNode(node types.NodeView) ([]change.Change, error) {
 	if !ok {
 		s.persistMu.Unlock()
 
-		return change.Change{}, fmt.Errorf("%w: %d", ErrNodeNotInNodeStore, node.ID())
+		return nil, fmt.Errorf("%w: %d", ErrNodeNotInNodeStore, node.ID())
 	}
 
 	err := s.db.DeleteNode(fresh.AsStruct())
@@ -1222,70 +1222,6 @@ func (s *State) SetNodeIPs(nodeID types.NodeID, ipv4, ipv6 *netip.Addr) (types.N
 // returned changes tell clients about the new addresses.
 // Like the other writes, it returns the changes alongside an error once the
 // NodeStore holds new addresses; callers publish them before handling it.
-func (s *State) BackfillNodeIPs() ([]string, []change.Change, error) {
-	genBefore := s.polMan.NodesGeneration()
-
-	// Hold persistMu until NodeStore has the new addresses, or a concurrent
-	// persist writes the old ones back from NodeStore in between.
-	s.persistMu.Lock()
-
-	changes, err := s.db.BackfillNodeIPs(s.ipAlloc)
-	if err != nil {
-		s.persistMu.Unlock()
-
-		return nil, nil, err
-	}
-
-	var readdressed []types.NodeID
-
-	// Copy only the IPs into [NodeStore]: the database rows lack
-	// runtime-only state such as sessions and online status.
-	if len(changes) > 0 {
-		nodes, err := s.db.ListNodes()
-		if err != nil {
-			s.persistMu.Unlock()
-
-			return changes, nil, fmt.Errorf("refreshing NodeStore after IP backfill: %w", err)
-		}
-
-		updates := make(map[types.NodeID]UpdateNodeFunc, len(nodes))
-		for _, node := range nodes {
-			existingNode, exists := s.nodeStore.GetNode(node.ID)
-			if exists && !slices.Equal(existingNode.IPs(), node.IPs()) {
-				readdressed = append(readdressed, node.ID)
-			}
-
-			updates[node.ID] = func(n *types.Node) {
-				n.IPv4 = node.IPv4
-				n.IPv6 = node.IPv6
-			}
-		}
-
-		s.nodeStore.UpdateNodes(updates)
-	}
-
-	s.persistMu.Unlock()
-
-	// IPs are policy inputs: without this, clients only learned the new
-	// addresses from whichever unrelated write next refreshed the policy.
-	c, err := s.updatePolicyManagerNodes(genBefore)
-
-	// A policy change carries no self node, so a readdressed node would
-	// not learn its own new addresses from it.
-	cs := make([]change.Change, 0, len(readdressed)+1)
-	if !c.IsEmpty() {
-		cs = append(cs, c)
-	}
-
-	for _, id := range readdressed {
-		cs = append(cs, change.NodeAdded(id))
-	}
-
-	return changes, cs, err
-}
-
-// ExpireExpiredNodes finds and processes expired nodes since the last check.
-// Returns next check time, state update with expired nodes, and whether any were found.
 func (s *State) BackfillNodeIPs() ([]string, []change.Change, error) {
 	genBefore := s.polMan.NodesGeneration()
 
