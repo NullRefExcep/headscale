@@ -810,6 +810,7 @@ func (pm *PolicyManager) BuildPeerMap(nodes views.Slice[types.NodeView]) map[typ
 	if pm == nil {
 		return nil
 	}
+
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
