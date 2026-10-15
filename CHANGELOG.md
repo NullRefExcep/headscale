@@ -2,7 +2,7 @@
 
 ## 0.30.0 (202x-xx-xx)
 
-**Minimum supported Tailscale client version: v1.82.0**
+**Minimum supported Tailscale client version: v1.84.0**
 
 ### v1 REST API replaced; gRPC and Protobuf removed
 
@@ -60,6 +60,24 @@ removed on this schedule:
 
 [#3352](https://github.com/juanfont/headscale/pull/3352)
 
+### NixOS test kit
+
+Projects built on Tailscale, such as tsnet services, tailscaled integrations or
+Tailscale client implementations, can now test against a real control server
+in their NixOS VM tests. Import `nixosModules.testkit` on a node named
+`headscale`. Clients join `http://headscale` with no certificates or other
+setup, and `hs-authkey USER` on that node mints their auth keys.
+`nixosModules.testkit-peer` adds a tailscaled peer that joins with `hs-join KEY`:
+
+```nix
+nodes.headscale.imports = [ inputs.headscale.nixosModules.testkit ];
+nodes.peer.imports = [ inputs.headscale.nixosModules.testkit-peer ];
+# testScript: peer.succeed(f"hs-join {headscale.succeed('hs-authkey alice').strip()}")
+```
+
+See `nix/README.md` for the full contract, recipes for tsnet and non-Go
+clients, and how to run the same setup without Nix.
+
 ### BREAKING
 
 #### Database
@@ -76,10 +94,22 @@ removed on this schedule:
 - Errors that previously returned HTTP 500 — unknown users or nodes, malformed input, duplicate names — now return the correct 404, 400 or 409 [#3324](https://github.com/juanfont/headscale/pull/3324)
 - The OpenAPI document is OpenAPI 3.1 at `/api/v1/openapi.yaml` (docs at `/api/v1/docs`), replacing Swagger 2.0 at `/swagger` [#3324](https://github.com/juanfont/headscale/pull/3324)
 
+#### Configuration
+
+- `derp.paths` files must end in `.yaml`, `.yml`, `.json` or `.hujson`; the extension picks the format
+- `dns.extra_records_path` must end in `.json`, `.hujson`, `.yaml` or `.yml`; the extension picks the format
+- A `derp.paths` file that decodes to no regions now stops headscale from starting instead of being silently ignored
+- `unix_socket_permission` must be a quoted octal string no higher than `"0777"`, e.g. `"0770"`; an unquoted number or an invalid value now stops headscale from starting instead of silently using `0700` [#3540](https://github.com/juanfont/headscale/pull/3540)
+
 #### CLI
 
 - `--output json` / `--output yaml` now emit the API's shape — camelCase fields, string-encoded IDs, RFC3339 timestamps — instead of the old Protobuf encoding [#3324](https://github.com/juanfont/headscale/pull/3324)
 - `headscale policy` renames the database-bypass flag from `--bypass-grpc-and-access-database-directly` to `--bypass-server-and-access-database-directly` [#3324](https://github.com/juanfont/headscale/pull/3324)
+
+#### NixOS module
+
+- `settings.ephemeral_node_inactivity_timeout` is removed; set `settings.node.ephemeral.inactivity_timeout`, which headscale reads instead
+- `settings.dns.split` is removed; headscale never read it, set `settings.dns.nameservers.split`
 
 ### Changes
 
@@ -88,6 +118,44 @@ removed on this schedule:
 - Fix `headscale users destroy`/`rename` reporting "multiple users match query" when no user matches; an ambiguous match now lists the matching users [#3476](https://github.com/juanfont/headscale/pull/3476)
 - Deleting a user that still owns nodes now lists the nodes (ID and hostname) that must be deleted first [#3475](https://github.com/juanfont/headscale/pull/3475)
 - Headscale now requires Go 1.27 to build
+- `headscale preauthkeys create --user` accepts a user name as well as an ID
+- `derp.paths` files may be Tailscale JSON or HuJSON DERP maps as well as YAML
+- `dns.extra_records_path` files may be HuJSON or YAML as well as JSON
+- A `derp.paths` region set to `null` removes that region again, as documented
+- Lower CPU use on large tailnets when node tags, owners, IPs or routes change [#3501](https://github.com/juanfont/headscale/pull/3501)
+- `headscale nodes backfillips` now sends the new IPs to connected clients [#3501](https://github.com/juanfont/headscale/pull/3501)
+- A registration request from a client below the minimum supported version is now rejected before it can log a node out, use a pre-auth key or start a login [#3519](https://github.com/juanfont/headscale/pull/3519)
+
+- A node re-registering with a spent, expired or revoked pre-auth key is now rejected if it expired or changed node key while the re-registration was in flight [#3525](https://github.com/juanfont/headscale/pull/3525)
+- DERP client verification (the embedded DERP server and the `/verify` endpoint) looks up the node key directly instead of scanning every node on each connection [#3520](https://github.com/juanfont/headscale/pull/3520)
+- Fix the unix socket being created `0700` instead of the documented `0770` when `unix_socket_permission` is unset. The socket grants full admin access without authentication, so members of its group gain that access; check who is in it before upgrading [#3540](https://github.com/juanfont/headscale/pull/3540)
+
+## 0.29.5 (2026-10-13)
+
+**Minimum supported Tailscale client version: v1.80.0**
+
+### Changes
+
+- Fix `via` exit-node steering being undone by an unrelated ACL or grant rule that matches the viewer [#3495](https://github.com/juanfont/headscale/pull/3495)
+- Fix `via` grants not offering exit nodes and subnet routes to a group that names an unknown user [#3516](https://github.com/juanfont/headscale/pull/3516)
+- Fix SSH `check` periods and app grants dropping a group that names an unknown user [#3516](https://github.com/juanfont/headscale/pull/3516)
+- Fix policy `tests` and `sshTests` failing for a group that names an unknown user [#3516](https://github.com/juanfont/headscale/pull/3516)
+- Fix an unknown user in `nodeAttrs` rejecting the policy [#3516](https://github.com/juanfont/headscale/pull/3516)
+- Fix every grant being fully resolved as if it had `via` when the policy has no `via` grants, slowing map generation on large tailnets [#3538](https://github.com/juanfont/headscale/pull/3538)
+- Fix a data race in `via` route resolution when the policy has both `via` grants and ACLs [#3515](https://github.com/juanfont/headscale/pull/3515)
+- Fix packet filters under `autogroup:self` not updating after a user is added or renamed [#3501](https://github.com/juanfont/headscale/pull/3501)
+- Fix a rejected policy leaving its packet filter active [#3501](https://github.com/juanfont/headscale/pull/3501)
+- Fix an exit node or subnet router not seeing its own approved routes until it reconnected, so `tailscale status` did not show it offering an exit node [#3518](https://github.com/juanfont/headscale/pull/3518)
+- Fix deleted nodes, and peers hidden by a policy change, staying listed in the Tailscale Android app; removed peers are now sent as their own incremental map update [#3492](https://github.com/juanfont/headscale/pull/3492) [#3527](https://github.com/juanfont/headscale/pull/3527)
+- Policy changes no longer resend DNS configuration to every node, sparing clients a full netmap rebuild; a node gets its DNS configuration when its own NextDNS nodeAttrs, tags or hostname change, which also fixes NextDNS device metadata going stale after a hostname change [#3492](https://github.com/juanfont/headscale/pull/3492)
+- Fix SSH access surviving the removal of its policy rules; clients kept their last SSH rules, and a pending SSH check could still be approved [#3517](https://github.com/juanfont/headscale/pull/3517)
+- Fix SSH check periods coming from the first check rule for a node pair instead of the rule for the login user [#3517](https://github.com/juanfont/headscale/pull/3517)
+- Policy changes resend a node's SSH policy only when it changed, sparing clients a full netmap rebuild [#3517](https://github.com/juanfont/headscale/pull/3517)
+- Fix SSH check accepting a repeated follow-up for an already-decided session, even after a rejection [#3526](https://github.com/juanfont/headscale/pull/3526)
+- Fix an ephemeral node being deleted while online, when it reconnected while its previous session was being marked offline [#3539](https://github.com/juanfont/headscale/pull/3539)
+- Fix peers dropping traffic from a node that re-authenticates after its key expired [#3541](https://github.com/juanfont/headscale/pull/3541)
+- Fix clients uploading logs to Tailscale Inc. while `logtail.enabled` is `false`; clients also granted the `data-plane-audit-logs` node attribute now go down until `tailscale up` [#3522](https://github.com/juanfont/headscale/pull/3522)
+- Fix a node ping being lost when a full map update is queued at the same time [#3523](https://github.com/juanfont/headscale/pull/3523)
 
 ## 0.29.4 (2026-09-23)
 
